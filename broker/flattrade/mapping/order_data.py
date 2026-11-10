@@ -276,7 +276,9 @@ def transform_tradebook_data(tradebook_data):
             "average_price": avg_price,
             "trade_value": trade_value,
             "orderid": trade.get("norenordno", ""),
-            "timestamp": trade.get("norentm", ""),
+            # Official TradeBook field is `fltm` (fill time); `norentm` is an
+            # OrderBook field, kept as a fallback.
+            "timestamp": trade.get("fltm") or trade.get("norentm", ""),
         }
         transformed_data.append(transformed_trade)
     return transformed_data

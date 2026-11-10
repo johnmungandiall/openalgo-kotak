@@ -179,3 +179,214 @@ def test_place_order_api_success_path_unchanged(monkeypatch):
     assert orderid == "123456789"
     assert response.get("stat") == "Ok"
     assert res.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 11.1 — auth accepts the official `status` field (and legacy `stat`)
+# ---------------------------------------------------------------------------
+
+
+def test_authenticate_broker_accepts_status_field(monkeypatch):
+    import broker.flattrade.api.auth_api as auth_api
+
+    class _FakeAuthResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"status": "Ok", "token": "T0K3N"}
+
+    class _FakeAuthClient:
+        def post(self, *args, **kwargs):
+            return _FakeAuthResponse()
+
+    monkeypatch.setenv("BROKER_API_KEY", "prefix:::real-key")
+    monkeypatch.setenv("BROKER_API_SECRET", "secret")
+    monkeypatch.setattr(auth_api, "get_httpx_client", lambda: _FakeAuthClient())
+
+    token, error = auth_api.authenticate_broker("req-code")
+    assert token == "T0K3N"
+    assert error is None
+
+
+def test_authenticate_broker_still_accepts_stat_field(monkeypatch):
+    import broker.flattrade.api.auth_api as auth_api
+
+    class _FakeAuthResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"stat": "Ok", "token": "T0K3N"}
+
+    class _FakeAuthClient:
+        def post(self, *args, **kwargs):
+            return _FakeAuthResponse()
+
+    monkeypatch.setenv("BROKER_API_KEY", "prefix:::real-key")
+    monkeypatch.setenv("BROKER_API_SECRET", "secret")
+    monkeypatch.setattr(auth_api, "get_httpx_client", lambda: _FakeAuthClient())
+
+    token, error = auth_api.authenticate_broker("req-code")
+    assert token == "T0K3N"
+    assert error is None
+
+
+def test_authenticate_broker_rejects_failure(monkeypatch):
+    import broker.flattrade.api.auth_api as auth_api
+
+    class _FakeAuthResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"status": "Not_Ok", "emsg": "bad code"}
+
+    class _FakeAuthClient:
+        def post(self, *args, **kwargs):
+            return _FakeAuthResponse()
+
+    monkeypatch.setenv("BROKER_API_KEY", "prefix:::real-key")
+    monkeypatch.setenv("BROKER_API_SECRET", "secret")
+    monkeypatch.setattr(auth_api, "get_httpx_client", lambda: _FakeAuthClient())
+
+    token, error = auth_api.authenticate_broker("req-code")
+    assert token is None
+    assert "bad code" in error
+
+
+# ---------------------------------------------------------------------------
+# 11.7 — cancel_order reports the broker's emsg, not a generic string
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_order_reports_emsg(monkeypatch):
+    import broker.flattrade.api.order_api as oa
+
+    class _FakeCancelResponse:
+        status_code = 400
+        status = 400
+
+        def json(self):
+            return {"stat": "Not_Ok", "emsg": "order already frozen"}
+
+    class _FakeCancelClient:
+        def post(self, *args, **kwargs):
+            return _FakeCancelResponse()
+
+    monkeypatch.setenv("BROKER_API_KEY", "prefix:::real-key")
+    monkeypatch.setattr(
+        oa, "get_httpx_client", lambda: _FakeCancelClient()
+    )
+
+    result, status = oa.cancel_order("123", "auth::key")
+    assert status == 400
+    assert result.get("message") == "order already frozen"
+
+
+def test_cancel_order_falls_back_to_message(monkeypatch):
+    import broker.flattrade.api.order_api as oa
+
+    class _FakeCancelResponse:
+        status_code = 400
+        status = 400
+
+        def json(self):
+            return {"stat": "Not_Ok", "message": "legacy message"}
+
+    class _FakeCancelClient:
+        def post(self, *args, **kwargs):
+            return _FakeCancelResponse()
+
+    monkeypatch.setenv("BROKER_API_KEY", "prefix:::real-key")
+    monkeypatch.setattr(
+        oa, "get_httpx_client", lambda: _FakeCancelClient()
+    )
+
+    result, status = oa.cancel_order("123", "auth::key")
+    assert status == 400
+    assert result.get("message") == "legacy message"
+
+
+# ---------------------------------------------------------------------------
+# 11.8 — TradeBook timestamp uses the official fltm, falls back to norentm
+# ---------------------------------------------------------------------------
+
+
+def test_transform_tradebook_data_uses_fltm():
+    from broker.flattrade.mapping.order_data import transform_tradebook_data
+
+    row = {
+        "fltm": "02-06-2026 15:46:23",
+        "norentm": "OLD-TIMESTAMP",
+        "tsym": "NIFTY",
+        "exch": "NFO",
+        "prd": "M",
+        "trantype": "B",
+        "qty": "5",
+        "avgprc": "100.5",
+        "norenordno": "abc",
+    }
+    out = transform_tradebook_data([row])[0]
+    assert out["timestamp"] == "02-06-2026 15:46:23"
+
+
+def test_transform_tradebook_data_falls_back_to_norentm():
+    from broker.flattrade.mapping.order_data import transform_tradebook_data
+
+    row = {
+        "norentm": "OLD-TIMESTAMP",
+        "tsym": "NIFTY",
+        "exch": "NFO",
+        "prd": "M",
+        "trantype": "B",
+        "qty": "5",
+        "avgprc": "100.5",
+        "norenordno": "abc",
+    }
+    out = transform_tradebook_data([row])[0]
+    assert out["timestamp"] == "OLD-TIMESTAMP"
+
+
+# ---------------------------------------------------------------------------
+# 11.10 — websocket auth ack is case-insensitive (official "Ok" vs constant "OK")
+# ---------------------------------------------------------------------------
+
+
+def _make_websocket():
+    # Load the module directly by path: importing via the streaming package runs
+    # streaming/__init__.py, which imports flattrade_adapter -> websocket_proxy
+    # -> every broker adapter -> flattrade_adapter again (circular). The module
+    # itself only imports stdlib + websocket, so a file-location load is safe.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "flattrade_websocket_mod",
+        os.path.join(SERVER_ROOT, "broker/flattrade/streaming/flattrade_websocket.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    ws = mod.FlattradeWebSocket(user_id="u", actid="a", accesstoken="t")
+    ws._start_heartbeat = lambda: None
+    ws._call_external_callback = lambda *a, **k: None
+    ws._close_websocket = lambda: None
+    return ws
+
+
+def test_websocket_auth_ack_accepts_ok_and_OK():
+    ws = _make_websocket()
+    assert ws._handle_auth_response({"s": "Ok"}) is True
+    assert ws.connected is True
+    assert ws.auth_failed is False
+
+    ws2 = _make_websocket()
+    assert ws2._handle_auth_response({"s": "OK"}) is True
+    assert ws2.connected is True
+
+
+def test_websocket_auth_ack_rejects_other_values():
+    ws = _make_websocket()
+    assert ws._handle_auth_response({"s": "Not_Ok"}) is True
+    assert ws.connected is False
+    assert ws.auth_failed is True

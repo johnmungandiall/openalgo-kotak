@@ -717,7 +717,8 @@ def cancel_order(orderid, auth):
         # Return an error response
         return {
             "status": "error",
-            "message": data.get("message", "Failed to cancel order"),
+            # Official failure field is `emsg`; keep `message` as a fallback.
+            "message": data.get("emsg") or data.get("message", "Failed to cancel order"),
         }, res.status_code
 
 

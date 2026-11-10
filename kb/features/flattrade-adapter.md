@@ -41,7 +41,7 @@ Qwantonomous Engine's trading requirements. The full record lives in
   uses Flattrade's own format rather than an invented one.
 
 ### Discrepancies
-Three order-path discrepancies were closed by code fixes on 2026-11-10 (tests:
+Seven order-path discrepancies were closed by code fixes on 2026-11-10 (tests:
 `test/test_flattrade_order_path_fixes.py`):
 - `api/order_api.py#place_order_api` now parses defensively — no more hard-indexed
   `response_data["stat"]` (KeyError → 500 on an HTML/proxy reply).
@@ -50,11 +50,22 @@ Three order-path discrepancies were closed by code fixes on 2026-11-10 (tests:
 - `mapping/transform_data.py#reverse_map_product_type` now maps `H`/`B`/`F`
   (Cover/Bracket/MTF) → `CO`/`BO`/`MTF` (and back), so a square-off keeps the
   position's real product instead of sending `product: None`.
+- `api/auth_api.py#authenticate_broker` accepts both `stat` and `status` in the
+  auth reply (the official field is `status`), so a healthy reply never reads as
+  an auth failure.
+- `api/order_api.py#cancel_order` reads `emsg` first (official failure field),
+  falling back to `message`.
+- `mapping/order_data.py#transform_tradebook_data` reads `fltm` (official
+  TradeBook field) with `norentm` fallback.
+- `streaming/flattrade_websocket.py#_handle_auth_response` compares the auth ack
+  case-insensitively, so the official `"Ok"` is accepted (the legacy constant
+  was `"OK"`).
 
-Still open:
-- `streaming/flattrade_websocket.py#AUTH_SUCCESS` is `"OK"` but the official ack
-  writes `"Ok"`; the comparison is case-sensitive. The order adapter already
-  accepts both — the market-data client does not.
+Still open (recorded, NOT fixed):
+- `mkt_protection` is sent on every order but is not an official field.
+- `EOS` retention is clamped to `DAY` (the engine only sends DAY/IOC).
+- TradeBook/TPSeries time-format contradiction in the docs (parse matches the
+  sample, not the field description).
 
 ## The one rule that generalises
 A broker helper's reply is **not always** the documented success payload. On

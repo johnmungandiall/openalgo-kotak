@@ -52,7 +52,11 @@ def authenticate_broker(code, password=None, totp_code=None):
 
         if response.status_code == 200:
             response_data = response.json()
-            if response_data.get("stat") == "Ok" and "token" in response_data:
+            # Official reply names the field `status`; some deployments emit `stat`.
+            # Accept both so a healthy reply never reads as an auth failure.
+            if (
+                response_data.get("stat") or response_data.get("status")
+            ) == "Ok" and "token" in response_data:
                 return response_data["token"], None
             else:
                 error_msg = response_data.get(
@@ -94,7 +98,11 @@ def authenticate_broker_oauth(code):
 
         if response.status_code == 200:
             response_data = response.json()
-            if response_data.get("stat") == "Ok" and "token" in response_data:
+            # Official reply names the field `status`; some deployments emit `stat`.
+            # Accept both so a healthy reply never reads as an auth failure.
+            if (
+                response_data.get("stat") or response_data.get("status")
+            ) == "Ok" and "token" in response_data:
                 return response_data["token"], None
             else:
                 return None, response_data.get(

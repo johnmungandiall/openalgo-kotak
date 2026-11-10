@@ -288,7 +288,9 @@ class FlattradeWebSocket:
         Returns:
             bool: True (message handled)
         """
-        if data.get("s") == self.AUTH_SUCCESS:
+        # Official ack writes "Ok"; the legacy constant is "OK". Compare case-
+        # insensitively so a healthy session is never treated as an auth rejection.
+        if str(data.get("s") or "").upper() == self.AUTH_SUCCESS:
             self.connected = True
             self.logger.info("Authentication successful")
             self._start_heartbeat()

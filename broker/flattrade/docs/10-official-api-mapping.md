@@ -720,22 +720,15 @@ gap is explicit rather than discovered later.
 ## 11. Discrepancies found while mapping
 
 Each is a real difference between the official contract and the adapter, read
-from both sides. **Three were closed by code fixes on 2026-11-10** (11.4,
-11.6, 11.11); the rest are recorded so the decision is visible.
+from both sides. **Seven were closed by code fixes on 2026-11-10** (11.1,
+11.4, 11.6, 11.7, 11.8, 11.10, 11.11); the rest are recorded so the decision
+is visible.
 
-### 11.1 Auth response field name
+### 11.1 Auth response field name — **FIXED**
 
 Official response uses **`status`** (`{ "token", "client", "status": "Ok", "emsg" }`).
-`api/auth_api.py#authenticate_broker` checks **`stat`**:
-
-```python
-if response_data.get("stat") == "Ok" and "token" in response_data:
-```
-
-The `"token" in response_data` half is what actually gates success, so a
-`status`-only reply still works — but the `stat` check is against a field the
-official response does not document. **Severity: low** (the token check carries
-it).
+`api/auth_api.py#authenticate_broker` used to check **`stat`**; it now accepts
+both `stat` and `status`, so a healthy reply can never read as an auth failure.
 
 ### 11.2 Token rollover window
 
@@ -774,18 +767,17 @@ defensively (`res.json()` guarded, `stat`/`norenordno` read via `.get()`), so a
 malformed reply becomes a broker-shaped failure. Test:
 `test/test_flattrade_order_path_fixes.py`.
 
-### 11.7 `cancel_order` reads `message`, not `emsg`
+### 11.7 `cancel_order` reads `message`, not `emsg` — **FIXED**
 
-Official failure field is `emsg`. The adapter reads
-`data.get("message", "Failed to cancel order")`, so the broker's real reason is
-dropped and the caller sees the generic string. **Severity: low** — the cancel
-still fails correctly, it just reports less.
+Official failure field is `emsg`. `api/order_api.py#cancel_order` now reads
+`emsg` first and falls back to `message`, so the broker's real reason reaches the
+caller.
 
-### 11.8 TradeBook timestamp field
+### 11.8 TradeBook timestamp field — **FIXED**
 
-Official TradeBook documents `fltm` (fill time). `transform_tradebook_data` reads
-`norentm`, which is documented for **OrderBook** and **SingleOrdHist**, not
-TradeBook. **Severity: low** — the tradebook timestamp may render empty.
+Official TradeBook documents `fltm` (fill time).
+`mapping/order_data.py#transform_tradebook_data` now reads `fltm` with
+`norentm` as fallback, so the timestamp no longer renders empty.
 
 ### 11.9 TPSeries time format — the docs contradict themselves
 
@@ -795,11 +787,11 @@ matching the sample. If the server ever follows the field description, every
 intraday candle is silently dropped (the parse failure is caught and `continue`d).
 **Severity: medium** — silent, and it would look like "no history available".
 
-### 11.10 The `s == "OK"` case sensitivity
+### 11.10 The `s == "OK"` case sensitivity — **FIXED**
 
-Covered in §9.3. **Severity: medium** — a healthy session could be treated as an
-auth rejection, which force-closes the socket and enters the bounded auth-retry
-path.
+`streaming/flattrade_websocket.py#_handle_auth_response` now compares the auth
+ack case-insensitively, so the official `"Ok"` is accepted and a healthy session
+is never force-closed into the auth-retry path.
 
 ### 11.11 Order endpoints are not rate-limited — **FIXED**
 
