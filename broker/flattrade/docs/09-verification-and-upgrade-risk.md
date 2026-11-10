@@ -86,7 +86,7 @@ forgotten:
 |---|---|
 | `transform_data` MARKET→LMT end-to-end | **none** — only `_marketable_limit_price` and `round_to_tick_size` are exercised |
 | `transform_data` SL-M→SL-LMT | **none** |
-| `_retention` (DAY/IOC clamp) | **none** |
+| `_retention` (DAY/IOC clamp) | `test/test_flattrade_order_path_fixes.py` |
 | `mpp_percentage` validation | **none** in this plugin (the shared `utils/mpp_slab.py` is exercised by other brokers' tests) |
 | `cancel_all_orders_api` guards | **none** |
 | `place_smartorder_api` flip clamp | **none** |

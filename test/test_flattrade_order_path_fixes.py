@@ -390,3 +390,22 @@ def test_websocket_auth_ack_rejects_other_values():
     assert ws._handle_auth_response({"s": "Not_Ok"}) is True
     assert ws.connected is False
     assert ws.auth_failed is True
+
+
+# ---------------------------------------------------------------------------
+# Verification gap — Flattrade _retention (DAY/IOC clamp) had no test.
+# Pins the documented decision: EOS is clamped to DAY, never sent.
+# ---------------------------------------------------------------------------
+
+
+def test_flattrade_retention_accepts_day_and_ioc_only():
+    from broker.flattrade.mapping.transform_data import _retention
+
+    assert _retention({"validity": "DAY"}) == "DAY"
+    assert _retention({"validity": "ioc"}) == "IOC"
+    assert _retention({}) == "DAY"
+    assert _retention(None) == "DAY"
+    # EOS is a documented Noren enum value, but the adapter deliberately clamps
+    # it to DAY (the engine only sends IOC/DAY), so it must never pass through.
+    assert _retention({"validity": "EOS"}) == "DAY"
+    assert _retention({"validity": "JUNK"}) == "DAY"
