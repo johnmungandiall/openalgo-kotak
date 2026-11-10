@@ -21,7 +21,7 @@ account setting, not a code change.
 | ID | Item | Req | Blocked by | Status |
 | --- | --- | --- | --- | --- |
 | N1 | Historical data — `get_history` returns an empty DataFrame | R1 | No candle endpoint in the API | **RESOLVED** — Yahoo fallback (PR #1466) |
-| N2 | Open interest — the response field name is undocumented | R1 | Doc lists `oi` as a filter, never as a field | Open |
+| N2 | Open interest — the response field name is undocumented | R1 | Doc lists `oi` as a filter, never as a field | **RESOLVED** — live-verified: the field IS `open_int` |
 | N3 | SL-M — the doc permits it, live Kotak rejects it | R1 | Doc and live behaviour contradict | Open (not a defect) |
 | N4 | Static IP whitelisting | — | Operational, not code | Open |
 
@@ -142,7 +142,15 @@ series today, and a backfill would cover the legs.
 
 ## N2 — Open interest: the response field name is undocumented
 
-**Req:** R1 · **Blocked by:** the doc names `oi` as a filter, never as a field
+**Req:** R1 · **Was blocked by:** the doc names `oi` as a filter, never as a field
+
+> **Status: resolved — verified LIVE (2026-11-10).** With a real session, a
+> quoted F&O contract (`NIFTY23NOV2625100CE`, `nse_fo|64443`) returns the
+> field `open_int` = 1,084,265 — the exact name the code already guessed — and
+> the adapter's `/api/v1/quotes` passes it through identically (`oi` = 1,084,265,
+> `ltp` = 281.9). **No code change was needed.** The concern was that the doc
+> never names the response field; that gap is now closed by observation. The
+> original analysis is kept below for the audit trail.
 
 **Code.** `broker/kotak/api/data.py#get_quotes` and
 `broker/kotak/api/data.py#_process_quotes_batch` both read:
@@ -181,11 +189,10 @@ no open interest.
 name written now is a second guess, and a wrong guess fails the same silent
 way.
 
-**What would unblock it.** One live authenticated call to
-`/script-details/1.0/quotes/neosymbol/nse_cm|<pSymbol>/oi` and reading the
-actual key. That is a five-minute check with a real session — it cannot be done
-from the docs, and it cannot be done here because no Kotak credentials are
-configured. Until then the honest state is "unknown", not "zero".
+**What unblocked it.** One live authenticated call to
+`/script-details/1.0/quotes/neosymbol/<exSeg>|<pSymbol>/all` and reading the
+actual key — done 2026-11-10 with a real session (see the status note above).
+The honest state was "unknown", not "zero"; it is now "known".
 
 **Interim mitigation, if the OI profile must ship before that check.** Make the
 absence visible: if no OI key is found in the response, log a warning once per
@@ -279,7 +286,7 @@ is K11.
 | ID | Permanently blocked? | Unblock |
 | --- | --- | --- |
 | N1 | No | **DONE** — Yahoo fallback (PR #1466) for indices + cash equities; option legs still need Historify backfill |
-| N2 | No | One live authenticated quotes call to read the real OI key |
+| N2 | No | **DONE** — live-verified 2026-11-10: the response field is `open_int`, and the adapter passes it through |
 | N3 | No | One live SL-M placement to settle doc-vs-broker |
 | N4 | No | User registers the IP on the dashboard |
 

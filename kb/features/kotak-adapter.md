@@ -139,15 +139,17 @@ candles from the free Yahoo Finance chart API:
 unavailable — the OI/IV/straddle charts that need legs still degrade to empty.
 Historify backfill (`get_history(source="db")`) remains the answer for those.
 
-## N2 open interest — still open
-Looks like data, not an error, which is why it is documented rather than left as
+## N2 open interest — RESOLVED (live-verified)
+Looks like data, not an error, which is why it was documented rather than left as
 a known limitation.
 - **N2 open interest** — `05-market-data-quotes.md` lists `oi` as a **filter**
-  you can request, never as a response **field**. `api/data.py#get_quotes` reads
-  `open_int`, a guess. Every OI is silently 0, so
-  `services/oi_profile_service.py#_fetch_daily_oi_changes` filters to nothing
-  and the OI chain renders all-zero. Unblock: one live authenticated quotes
-  call to read the real key.
+  you can request, never as a response **field** — so `api/data.py#get_quotes`
+  reading `open_int` was a guess. **Verified LIVE 2026-11-10:** a real session
+  quoting `NIFTY23NOV2625100CE` (`nse_fo|64443`) returns `open_int` =
+  1,084,265 — the exact field name the code already reads — and the adapter's
+  `/api/v1/quotes` passes it through identically (`oi` = 1,084,265,
+  `ltp` = 281.9). **No code change was needed**; the field-name gap is closed
+  by observation.
 
 ## N3 — SL-M is NOT a defect
 The doc permits `pt: "SL-M"`; live Kotak rejected it ("Market order with Algo Id
