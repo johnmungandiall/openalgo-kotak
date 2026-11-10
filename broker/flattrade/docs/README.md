@@ -48,6 +48,7 @@ The engine-side contracts these changes serve are documented in
 | 07 | `07-order-updates.md` | The order-update adapter, its Noren handshake, and why Flattrade is served by REST polling instead |
 | 08 | `08-symbols-and-master-contract.md` | Index symbol normalisation, tick-size defaults, expiry format, BSE index detection, supported exchanges |
 | 09 | `09-verification-and-upgrade-risk.md` | The tests that pin this behaviour, how to re-verify without a broker, and the upgrade checklist |
+| 10 | `10-official-api-mapping.md` | **Endpoint-by-endpoint, field-by-field mapping of the official Flattrade PiConnect API onto the adapter** — every request/response field, the 12 endpoints used vs the ~16 unused, and 11 discrepancies found while mapping |
 
 ---
 
@@ -57,6 +58,9 @@ The engine-side contracts these changes serve are documented in
   the money is.
 - **Chasing a live defect?** 03 (square-off) and 04 (cancel-all) first — those
   are the two that produced production HTTP 500s.
+- **Asking "what does the adapter actually send to Flattrade?"** 10. It is the
+  only document that reads the official API contract alongside the code, field by
+  field.
 - **Chasing a slow dashboard or a frozen chart?** 05 (funds) and 06 (feeds).
 - **About to upgrade OpenAlgo?** 09, before anything else.
 
