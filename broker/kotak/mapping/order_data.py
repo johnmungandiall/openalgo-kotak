@@ -5,6 +5,53 @@ from utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _as_int(value):
+    """Tolerant int for Kotak's string-typed numbers ("75", "75.0", "", None)."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _book_rows(reply, what):
+    """Normalise a Kotak book reply to a list of rows, or [] when unreadable.
+
+    A FAILED read is a bare {"stat": "Not_Ok", "emsg": ...} dict with no "data"
+    key (07-portfolio-positions.md §5, 11-order-reports.md §5.1). Indexing
+    ["data"] on that raised KeyError, and iterating the dict yielded its string
+    KEYS - so `order["trnsTp"]` raised TypeError. Both surfaced as a generic
+    HTTP 500 from the service layer, which reads as "the server broke" rather
+    than "the broker said no".
+
+    This is the display path, so an unreadable book degrades to an empty list
+    rather than raising; the trading paths use
+    api/order_api.py#_read_book, which raises so a decision is never made on a
+    book it could not see.
+    """
+    if reply is None:
+        logger.warning(f"{what}: no reply from broker")
+        return []
+    if isinstance(reply, list):
+        return [row for row in reply if isinstance(row, dict)]
+    if isinstance(reply, dict):
+        if reply.get("stat") == "Not_Ok":
+            logger.warning(
+                f"{what}: broker error ({reply.get('emsg') or reply.get('message')})"
+            )
+            return []
+        data = reply.get("data")
+        if data is None:
+            logger.debug(f"{what}: no data available")
+            return []
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        if isinstance(data, dict):
+            return [data]
+        return []
+    logger.warning(f"{what}: unexpected reply type {type(reply).__name__}")
+    return []
+
+
 def _openalgo_symbol(row, exchange):
     """Resolve one Kotak row to its OpenAlgo symbol.
 
@@ -45,26 +92,17 @@ def map_order_data(order_data):
     Returns:
     - The modified order_data with updated 'tradingsymbol' and 'product' fields.
     """
-    # Check if 'data' is None
-    # if order_data has key 'data' and its value is None
-
-    if order_data["stat"] == "Not_Ok":
-        logger.debug("No data available.")
-        order_data = {}  # or set it to an empty list if it's supposed to be a list
-        return order_data
-
-    if order_data["data"] is None:
-        # Handle the case where there is no data
-        # For example, you might want to display a message to the user
-        # or pass an empty list or dictionary to the template.
-        logger.debug("No data available.")
-        order_data = {}  # or set it to an empty list if it's supposed to be a list
-    else:
-        order_data = order_data["data"]
+    order_data = _book_rows(order_data, "Kotak order book")
 
     if order_data:
         for order in order_data:
-            exchange = map_exchange(order["exSeg"])
+            exchange = map_exchange(order.get("exSeg"))
+            if not exchange:
+                logger.debug(
+                    f"Kotak order book: unknown exchange segment "
+                    f"{order.get('exSeg')!r}; keeping the raw value"
+                )
+                exchange = order.get("exSeg")
             order["exSeg"] = exchange
 
             symbol_from_db = _openalgo_symbol(order, exchange)
@@ -90,24 +128,28 @@ def calculate_order_statistics(order_data):
 
     if order_data:
         for order in order_data:
-            # Count buy and sell orders
-            if order["trnsTp"] == "B":
+            # .get() throughout: a row missing trnsTp/ordSt used to raise
+            # KeyError and take the whole statistics block down with it.
+            trns_tp = order.get("trnsTp")
+            if trns_tp == "B":
                 order["trnsTp"] = "BUY"
                 total_buy_orders += 1
-            elif order["trnsTp"] == "S":
+            elif trns_tp == "S":
                 order["trnsTp"] = "SELL"
                 total_sell_orders += 1
 
             # Normalize "trigger pending" to "open" for UI compatibility
-            if order["ordSt"] == "trigger pending":
+            ord_st = order.get("ordSt")
+            if ord_st == "trigger pending":
                 order["ordSt"] = "open"
+                ord_st = "open"
 
             # Count orders based on their status
-            if order["ordSt"] == "complete":
+            if ord_st == "complete":
                 total_completed_orders += 1
-            elif order["ordSt"] == "open":
+            elif ord_st == "open":
                 total_open_orders += 1
-            elif order["ordSt"] == "rejected":
+            elif ord_st == "rejected":
                 total_rejected_orders += 1
 
     # Compile and return the statistics
@@ -181,23 +223,13 @@ def map_trade_data(trade_data):
     Returns:
     - The modified order_data with updated 'tradingsymbol' and 'product' fields.
     """
-    if trade_data["stat"] == "Not_Ok":
-        logger.debug("No data available.")
-        trade_data = {}  # or set it to an empty list if it's supposed to be a list
-        return trade_data
-        # Check if 'data' is None
-    if trade_data["data"] is None:
-        # Handle the case where there is no data
-        # For example, you might want to display a message to the user
-        # or pass an empty list or dictionary to the template.
-        logger.debug("No data available.")
-        trade_data = {}  # or set it to an empty list if it's supposed to be a list
-    else:
-        trade_data = trade_data["data"]
+    trade_data = _book_rows(trade_data, "Kotak trade book")
 
     if trade_data:
         for order in trade_data:
-            exchange = map_exchange(order["exSeg"])
+            exchange = map_exchange(order.get("exSeg"))
+            if not exchange:
+                exchange = order.get("exSeg")
             order["exSeg"] = exchange
 
             symbol_from_db = _openalgo_symbol(order, exchange)
@@ -205,9 +237,10 @@ def map_trade_data(trade_data):
                 order["trdSym"] = symbol_from_db
 
             # Map transaction type regardless of symbol lookup result
-            if order["trnsTp"] == "B":
+            trns_tp = order.get("trnsTp")
+            if trns_tp == "B":
                 order["trnsTp"] = "BUY"
-            elif order["trnsTp"] == "S":
+            elif trns_tp == "S":
                 order["trnsTp"] = "SELL"
     logger.debug(f"Mapped Kotak tradebook: {trade_data}")
     return trade_data
@@ -243,8 +276,8 @@ def transform_positions_data(positions_data):
             "symbol": position.get("trdSym", ""),
             "exchange": position.get("exSeg", ""),
             "product": position.get("prod", ""),
-            "quantity": (int(position.get("flBuyQty", 0)) - int(position.get("flSellQty", 0)))
-            + (int(position.get("cfBuyQty", 0)) - int(position.get("cfSellQty", 0))),
+            "quantity": (_as_int(position.get("flBuyQty")) - _as_int(position.get("flSellQty")))
+            + (_as_int(position.get("cfBuyQty")) - _as_int(position.get("cfSellQty"))),
             "average_price": position.get("avgnetprice", 0.0),
         }
         buy_qty = float(position.get("flBuyQty", 0))
@@ -321,16 +354,18 @@ def map_portfolio_data(portfolio_data):
     # Modify 'product' field for each holding if applicable
 
     for portfolio in holdings:
-        token = portfolio["instrumentToken"]
+        token = portfolio.get("instrumentToken")
 
-        exchange = map_exchange(portfolio["exchangeSegment"])
+        exchange = map_exchange(portfolio.get("exchangeSegment"))
+        if not exchange:
+            exchange = portfolio.get("exchangeSegment")
         portfolio["exchangeSegment"] = exchange
-        symbol_from_db = get_symbol(token, exchange)
+        symbol_from_db = get_symbol(token, exchange) if token else None
 
         # Check if a symbol was found; if so, update the trading_symbol in the current order
         if symbol_from_db:
             portfolio["symbol"] = symbol_from_db
-        if portfolio["instrumentType"] == "Equity":
+        if portfolio.get("instrumentType") == "Equity":
             portfolio["instrumentType"] = "CNC"  # Modify 'product' field
         else:
             logger.debug("Kotak Portfolio - Product Value for Delivery Not Found or Changed.")

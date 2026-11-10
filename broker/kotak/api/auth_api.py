@@ -82,8 +82,10 @@ def authenticate_broker(mobile_number, totp, mpin):
             content=payload,
         )
 
+        # Log the SHAPE of the reply, never the body: it carries the view token
+        # and sid in plaintext (02-authentication.md §5), and a debug log is a
+        # file that gets shipped in support bundles.
         logger.debug(f"TOTP Login Response Status: {response.status_code}")
-        logger.debug(f"TOTP Login Response: {response.text}")
 
         data_dict = json.loads(response.text)
 
@@ -118,8 +120,10 @@ def authenticate_broker(mobile_number, totp, mpin):
             content=payload,
         )
 
+        # Same rule as the TOTP step: the body carries the TRADE token and
+        # session sid, which are live trading credentials for the rest of the
+        # day (14-troubleshooting-faqs-error-codes.md Q2).
         logger.debug(f"MPIN Validation Response Status: {response.status_code}")
-        logger.debug(f"MPIN Validation Response: {response.text}")
 
         data_dict = json.loads(response.text)
 
@@ -143,8 +147,11 @@ def authenticate_broker(mobile_number, totp, mpin):
         # Create auth string: trading_token:::trading_sid:::base_url:::access_token
         # This format allows extracting all components needed for subsequent API calls
         auth_string = f"{trading_token}:::{trading_sid}:::{base_url}:::{access_token}"
+        # Never log the token or the sid, not even a prefix: the sid was
+        # previously written in FULL here, so truncating the token alongside it
+        # bought nothing. Log only that the string was built and its shape.
         logger.debug(
-            f"AUTH TOKEN CREATED: {trading_token[:10]}...:::{trading_sid}:::{base_url}:::{access_token[:10]}..."
+            f"AUTH TOKEN CREATED: 4 components, baseUrl={base_url}"
         )
 
         return auth_string, None

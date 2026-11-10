@@ -137,6 +137,27 @@ def _fmt_price(value):
     return str(value)
 
 
+def _retention(data):
+    """Kotak order validity (`rt` at place, `vd` at modify): ``DAY`` or ``IOC``.
+
+    Both fields were hardcoded to ``"DAY"``, so IOC was unreachable from any
+    caller even though 06-trading-place-modify-cancel.md §4 documents it for
+    both endpoints.
+
+    IOC matters for exits: a MARKET order is rewritten to a marketable LIMIT by
+    the MPP layer, so with DAY retention an unfilled remainder would REST behind
+    the touch instead of being cancelled.
+
+    Clamped here rather than trusted from the caller, because a mapper is also
+    reachable from internal callers that assemble the dict themselves
+    (smart-order exit branch, close_all_positions, modify). An unknown string
+    would be rejected by the OMS, and an absent value keeps the legacy DAY
+    retention every existing install relies on.
+    """
+    value = str((data or {}).get("validity") or "").strip().upper()
+    return value if value in ("DAY", "IOC") else "DAY"
+
+
 def transform_data(data, token):
     """
     Transforms the new API request structure to the current expected structure.
@@ -157,7 +178,7 @@ def transform_data(data, token):
         "pr": _fmt_price(data.get("price", 0)),
         "pt": order_type,
         "qt": str(data["quantity"]),
-        "rt": "DAY",
+        "rt": _retention(data),
         "tp": _fmt_price(data.get("trigger_price", 0)),
         "ts": symbol,
         "tt": "B" if action == "BUY" else ("S" if action == "SELL" else "None"),
@@ -177,7 +198,7 @@ def transform_modify_order_data(data, token):
         "es": reverse_map_exchange(data["exchange"]),
         "mp": "0",
         "dd": "NA",
-        "vd": "DAY",
+        "vd": _retention(data),
         "pc": data.get("product", "MIS"),
         "pr": _fmt_price(data.get("price", 0)),
         "pt": map_order_type(data["pricetype"]),
@@ -196,23 +217,46 @@ def transform_modify_order_data(data, token):
 
 
 def map_order_type(pricetype):
-    """
-    Maps the new pricetype to the existing order type.
+    """Map an OpenAlgo pricetype to Kotak's documented `pt` value.
+
+    06-trading-place-modify-cancel.md §4 allows exactly `L`, `MKT`, `SL`,
+    `SL-M`. The previous default was the literal string ``"MARKET"``, which is
+    NOT one of them - so any unmapped pricetype produced a payload Kotak
+    rejected, and the error pointed at the order type rather than at the bad
+    input that caused it.
+
+    Raising is deliberate: an unknown pricetype silently becoming a MARKET order
+    is how an unintended market order gets sent. The caller (place_order_api /
+    modify_order) already turns this into a clean error response.
     """
     order_type_mapping = {"MARKET": "MKT", "LIMIT": "L", "SL": "SL", "SL-M": "SL-M"}
-    return order_type_mapping.get(pricetype, "MARKET")  # Default to MARKET if not found
+    mapped = order_type_mapping.get(pricetype)
+    if mapped is None:
+        raise ValueError(
+            f"Unsupported pricetype {pricetype!r} for Kotak; "
+            f"expected one of {sorted(order_type_mapping)}"
+        )
+    return mapped
 
 
 def map_product_type(product):
     """
     Maps the new product type to the existing product type.
     """
+    # 06-trading-place-modify-cancel.md §4 documents `pc` as NRML, CNC, MIS, CO,
+    # BO, MTF. MTF was missing entirely, so an MTF order went out with
+    # "pc": null - not a documented value, rejected only after the request was
+    # sent. CO/BO are discontinued for NEW orders since 1 April 2026 (same doc,
+    # opening note) but are still mapped so a pre-cutover position can be closed.
     product_type_mapping = {
         "CNC": "CNC",
         "NRML": "NRML",
         "MIS": "MIS",
+        "MTF": "MTF",
+        "CO": "CO",
+        "BO": "BO",
     }
-    return product_type_mapping.get(product)  # Default to DELIVERY if not found
+    return product_type_mapping.get(product)
 
 
 def map_variety(pricetype):
@@ -261,9 +305,16 @@ def reverse_map_product_type(product):
     """
     Maps the new product type to the existing product type.
     """
+    # CO/BO are mapped so a position opened before the 1 April 2026 cutover can
+    # still be squared off - the exit endpoints are retained for that reason
+    # (15-api-reference.md). Returning None here put "product": null into the
+    # square-off payload.
     reverse_product_type_mapping = {
         "CNC": "CNC",
         "NRML": "NRML",
         "MIS": "MIS",
+        "MTF": "MTF",
+        "CO": "CO",
+        "BO": "BO",
     }
     return reverse_product_type_mapping.get(product)

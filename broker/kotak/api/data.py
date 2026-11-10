@@ -5,6 +5,7 @@ import urllib.parse
 import httpx
 import pandas as pd
 
+from broker.kotak.api.rate_limit import apply_rate_limit
 from database.token_db import get_br_symbol, get_brexchange, get_token
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
@@ -90,8 +91,11 @@ class BrokerData:
 
         try:
             logger.info(f"QUOTES API - Making request to: {url}")
-            logger.debug(f"QUOTES API - Using access_token: {self.access_token[:10]}...")
+            # Never log the access token, not even a prefix: it is a live
+            # credential (14-troubleshooting-faqs-error-codes.md Q2).
 
+            # Account-wide budget: 10 requests/second across all Kotak APIs.
+            apply_rate_limit()
             response = client.get(url, headers=headers)
             logger.info(f"QUOTES API - Response status: {response.status_code} for {url}")
 

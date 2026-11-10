@@ -79,7 +79,16 @@ def parse_margin_response(response_data):
 
         # Check if the response status is Ok
         if response_data.get("stat") != "Ok":
-            error_message = response_data.get("errMsg", "Failed to calculate margin")
+            # The margin endpoint documents `emsg` (10-portfolio-margins.md §5).
+            # `errMsg` belongs to the LOGIN responses (02-authentication.md), a
+            # different endpoint family - reading it here discarded the real
+            # reason and replaced it with a generic message, so a session expiry
+            # looked like a margin-engine fault.
+            error_message = (
+                response_data.get("emsg")
+                or response_data.get("errMsg")
+                or "Failed to calculate margin"
+            )
             return {"status": "error", "message": error_message}
 
         # Extract margin data
