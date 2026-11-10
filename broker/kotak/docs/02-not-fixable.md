@@ -295,7 +295,7 @@ differently from one who trusts a zero.
 
 ## Related
 
-- [`01-fixable-defects.md`](01-fixable-defects.md) — the 18 defects that a code
+- [`01-fixable-defects.md`](01-fixable-defects.md) — the 19 defects that a code
   change can close.
 - [`README.md`](README.md) — the requirement mapping and reading order.
 - `broker/flattrade/docs/10-official-api-mapping.md` §11 — the same exercise for

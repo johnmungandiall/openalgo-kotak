@@ -1,14 +1,18 @@
 # Kotak adapter — fixable defects
 
-18 defects where the official Kotak Neo Trade API v2 documentation fully
-specifies the correct behaviour, so the fix is a code change with a known
-target. Each entry names the code, the doc evidence, why it matters, and the
-fix.
+19 defects where the official Kotak Neo Trade API v2 documentation (or the
+upstream PR that fixes them) fully specifies the correct behaviour, so the fix
+is a code change with a known target. Each entry names the code, the evidence,
+why it matters, and the fix.
 
-**All 18 are IMPLEMENTED.** Verified by `test/test_kotak_adapter_fixes.py`
-(22 tests, all passing) plus the 204 existing tests in
-`test/test_smartorder_logic.py`. Each entry below keeps its original
-evidence and fix description, and now records what was actually changed.
+**All 19 are IMPLEMENTED.** Verified by `test/test_kotak_adapter_fixes.py`
+(22 tests), `test/test_kotak_funds_pnl.py` (15 tests) and the 204 existing
+tests in `test/test_smartorder_logic.py` — 261 passing. Each entry below keeps
+its original evidence and fix description, and records what was actually
+changed.
+
+K19 was added after the first 18: it is the funds PnL defect fixed from PR
+[`marketcalls/openalgo#1224`](https://github.com/marketcalls/openalgo/pull/1224).
 
 Severity is about blast radius, not effort:
 
@@ -28,6 +32,7 @@ Severity is about blast radius, not effort:
 | K4 | An unreadable position book reads as a flat book | R3 | Critical |
 | K5 | Funds reads three field names the doc does not define | R6 | High |
 | K6 | Funds has no cache and no single-flight | R6 | Medium |
+| K19 | Funds PnL trusts the limits reply's `rpnl`, which is wrong for closed positions | R6 | High |
 | K7 | IOC is unreachable — `rt` and `vd` are hardcoded `DAY` | R1 | High |
 | K8 | `map_order_type` defaults to `"MARKET"`, which is not a valid Kotak value | R1 | High |
 | K9 | MTF is unmapped, so an MTF order goes out with `pc: null` | R1 | Medium |
@@ -256,6 +261,77 @@ this purpose. Keep `CollateralValue` for the `collateral` field and
 `MarginUsed` for `utiliseddebits`, both of which the code already reads
 correctly. If a fallback to the current formula is kept for older responses,
 it must log when it is used — a silent fallback is what hid this defect.
+
+---
+
+## K19 — Funds PnL trusts the limits reply's `rpnl`, which is wrong for closed positions
+
+**Severity:** High · **Req:** R6
+
+**Code.** `broker/kotak/api/funds.py#_fetch_funds` previously read PnL straight
+out of the limits reply:
+
+```python
+"m2munrealized": f"{float(margin_data.get('UnrealizedMtomPrsnt', 0)):.2f}",
+"m2mrealized": f"{float(margin_data.get('RealizedMtomPrsnt', 0)):.2f}",
+```
+
+**Doc / upstream.** Kotak's `rpnl` is inaccurate for closed positions — the
+reason PR [`marketcalls/openalgo#1224`](https://github.com/marketcalls/openalgo/pull/1224)
+exists. The position book carries the authoritative amounts: `buyAmt`,
+`sellAmt`, `cfBuyAmt`, `cfSellAmt`, `flBuyQty`, `flSellQty`, `cfBuyQty`,
+`cfSellQty` (`07-portfolio-positions.md` §5).
+
+**Why it matters.** A realized PnL that is wrong for closed positions is the
+number a user checks to decide whether a strategy worked. It is also the number
+the dashboard's PnL display rides on.
+
+**Fix.** Ported from PR #1224, adapted to this tree:
+
+- `safe_float` / `safe_int` — Kotak returns every numeric field as a **string**
+  and nulls the ones it has no value for, so a bare `float()` raised.
+- `_position_symbol` — resolves a position row to (symbol, exchange) from
+  `trdSym`/`sym`, using `tok` only when present. The PR used `tok` alone, which
+  is **not** a documented positions field and would silently fail every row.
+- `_pnl_from_positions` — computes realized and unrealized from the book:
+  - fully closed (`net_qty == 0`): `sellAmt - buyAmt`;
+  - partial long: `sellAmt - (avgBuy × sellQty)`;
+  - partial short: `(avgSell × buyQty) - buyAmt`;
+  - unrealized: `(ltp - avg) × netQty`, buy-average for longs, sell-average for
+    shorts;
+  - carry-forward amounts and quantities are included throughout.
+- LTP is batch-fetched via `BrokerData.get_multiquotes` for open positions only.
+
+**Fallbacks — a wrong number is worse than the broker's own number.** The
+limits reply's `RealizedMtomPrsnt` / `UnrealizedMtomPrsnt` are used when the
+book is unreadable, empty, the quote fetch throws, or **not one** open position
+could be priced. If *some* positions priced, the computed figure stands —
+falling back would discard the ones that worked.
+
+**Deliberately NOT taken from the PR.** Its diff predates K5 and still computed
+`availablecash` from `RmsPayInAmt` / `RmsPayOutAmt` / `Collateral` — three names
+absent from the documented response. Applying it verbatim would have reverted
+the verified `Net` fix and reintroduced the silent-zero bug. `availablecash`
+stays on `Net`; a regression test pins it.
+
+**Post-K19 collateral fix — PnL was displaying the BALANCE as profit.** The app's
+P&L is `collateral + m2mrealized + m2munrealized`
+(`docs/openalgo-api-contract.md` §2.1). `collateral` mapped from
+`CollateralValue` — which equals `Net` on a cash-only account (verified live:
+both 2006.59 with `MarginUsed` 0) — so the dashboard showed P&L +2006.59 with
+both M2M legs at 0.00. Flattrade maps `collateral` to `brkcollamt`, the
+pledged-SECURITIES figure (`broker/flattrade/api/funds.py#_fetch_funds`), so
+Kotak now maps it to its own securities-only field, `Collateral` (0 when
+nothing is pledged). `availablecash` still carries the balance, which is what
+the BAL pill reads. Tests: `test_collateral_is_pledged_securities_not_the_balance`
+asserts the app PnL is 0 on a cash-only account, and
+`test_pledged_collateral_still_reported` asserts a pledged amount still flows
+through.
+
+**Verified.** `test/test_kotak_funds_pnl.py` — 15 tests covering every branch
+above plus the four fallbacks and the K5 guard. Live: `/api/v1/funds` returns
+`availablecash=2006.59`, `m2mrealized=0.00`, `m2munrealized=0.00` on an account
+with no open positions (empty book → documented fallback).
 
 ---
 
@@ -688,13 +764,14 @@ were applied in.
 | --- | --- |
 | `broker/kotak/api/rate_limit.py` (new) | K16 |
 | `broker/kotak/api/order_api.py` | K1, K2, K3, K4, K11, K13, K14, K15, K16, K18 |
-| `broker/kotak/api/funds.py` | K5, K6, K12, K16 |
+| `broker/kotak/api/funds.py` | K5, K6, K12, K16, K19 |
 | `broker/kotak/mapping/transform_data.py` | K7, K8, K9, K10 |
 | `broker/kotak/mapping/order_data.py` | K11 |
 | `broker/kotak/mapping/margin_data.py` | K17 |
 | `broker/kotak/api/auth_api.py` | K12 |
 | `broker/kotak/api/data.py` | K12, K16 |
-| `test/test_kotak_adapter_fixes.py` (new) | verification for all 18 |
+| `test/test_kotak_adapter_fixes.py` (new) | verification for K1–K18 |
+| `test/test_kotak_funds_pnl.py` (new) | verification for K19 |
 
 ## Verification
 

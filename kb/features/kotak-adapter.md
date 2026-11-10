@@ -5,10 +5,12 @@ requirements that Flattrade meets. The assessment is split into what a code
 change can close and what the official API cannot support, in
 `broker/kotak/docs/`.
 
-**All 18 fixable defects (K1–K18) are IMPLEMENTED and verified.** Of the 4
+**All 19 fixable defects (K1–K19) are IMPLEMENTED and verified.** Of the 4
 not-fixable items, **N1 (historical data) is now RESOLVED** via the Yahoo
 Finance fallback ported from PR `marketcalls/openalgo#1466`. N2–N4 remain open —
 they need a live Kotak session, not a code change.
+
+K19 (funds PnL) was added later, from PR `marketcalls/openalgo#1224`.
 
 ## Read this first
 - `broker/kotak/docs/README.md` — requirement mapping (R1–R7), reading order,
@@ -37,23 +39,57 @@ all (N1) — the order-placement half of R1 is complete.
 |---|---|
 | `broker/kotak/api/rate_limit.py` (new) | K16 |
 | `broker/kotak/api/order_api.py` | K1, K2, K3, K4, K11, K13, K14, K15, K16, K18 |
-| `broker/kotak/api/funds.py` | K5, K6, K12, K16 |
+| `broker/kotak/api/funds.py` | K5, K6, K12, K16, K19 |
 | `broker/kotak/mapping/transform_data.py` | K7, K8, K9, K10 |
 | `broker/kotak/mapping/order_data.py` | K11 |
 | `broker/kotak/mapping/margin_data.py` | K17 |
 | `broker/kotak/api/auth_api.py` | K12 |
 | `broker/kotak/api/data.py` | K12, K16, **N1 (Yahoo history)** |
-| `test/test_kotak_adapter_fixes.py` (new) | verification for all 18 |
+| `test/test_kotak_adapter_fixes.py` (new) | verification for K1–K18 |
 | `test/test_kotak_history.py` (new) | verification for N1 |
+| `test/test_kotak_funds_pnl.py` (new) | verification for K19 |
 
 ## Verification
 ```
 .venv/Scripts/python.exe -m pytest test/test_kotak_adapter_fixes.py -q  -> 22 passed
 .venv/Scripts/python.exe -m pytest test/test_kotak_history.py -q        -> 20 passed
+.venv/Scripts/python.exe -m pytest test/test_kotak_funds_pnl.py -q     -> 15 passed
 .venv/Scripts/python.exe -m pytest test/test_smartorder_logic.py -q      -> 204 passed
 ```
 The tests exercise the real functions with the broker/HTTP boundary
 monkeypatched, so a regression fails there rather than in production.
+
+## K19 funds PnL — computed from the position book
+Kotak's limits reply carries `RealizedMtomPrsnt` / `UnrealizedMtomPrsnt`, but
+its `rpnl` is **inaccurate for closed positions** — the reason PR
+`marketcalls/openalgo#1224` exists. `api/funds.py#_pnl_from_positions` now
+computes both from the position book:
+- fully closed (`net_qty == 0`): `sellAmt - buyAmt`
+- partial long: `sellAmt - (avgBuy × sellQty)`
+- partial short: `(avgSell × buyQty) - buyAmt`
+- unrealized: `(ltp - avg) × netQty` — buy-average for longs, sell-average for
+  shorts; carry-forward amounts/quantities included throughout
+- LTP batch-fetched via `BrokerData.get_multiquotes`, open positions only
+
+**Fallbacks:** the limits reply's own MTOM fields are used when the book is
+unreadable, empty, the quote fetch throws, or **not one** open position could be
+priced. If *some* priced, the computed figure stands.
+
+**Two deliberate departures from the PR:**
+1. `_position_symbol` resolves from `trdSym`/`sym`, not `tok` alone — `tok` is
+   not a documented positions field, so the PR's token-only lookup would fail
+   every row.
+2. `availablecash` stays on the documented `Net` field (K5). The PR's diff
+   predates K5 and would have reverted it, reintroducing the silent-zero bug.
+   A regression test pins this.
+
+**Collateral fix (post-K19).** The app's P&L is `collateral + m2mrealized +
+m2munrealized` (`docs/openalgo-api-contract.md` §2.1). `collateral` mapped from
+`CollateralValue`, which equals `Net` on a cash-only account, so P&L displayed
+the **balance** as profit (screenshot: P&L +₹2006.59 with M2M 0/0). Now maps
+to `Collateral` — Kotak's pledged-SECURITIES field, the same meaning as
+Flattrade's `brkcollamt`. `availablecash` still carries the balance for the BAL
+pill. Live verified: `availablecash=2006.59`, `collateral=0.00`.
 
 R5 is the one area where Kotak is **better** than Flattrade: the order-update
 adapter has a connect-ack watchdog + handshake-encoding alternation, and the

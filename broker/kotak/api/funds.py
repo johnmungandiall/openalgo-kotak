@@ -44,6 +44,34 @@ from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+def safe_float(value, default=0.0):
+    """Convert to float, tolerating None, "" and non-numeric strings.
+
+    Kotak returns every numeric field as a STRING, and omits or nulls fields it
+    has no value for. A bare float() on those raises and takes the whole funds
+    response down with it.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        logger.debug(f"Could not convert {value!r} to float; using {default}")
+        return default
+
+
+def safe_int(value, default=0):
+    """Convert to int, tolerating None, "" and non-numeric strings."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        logger.debug(f"Could not convert {value!r} to int; using {default}")
+        return default
+
+
 # A funds snapshot is not tick data: the dashboard polls faster than a balance
 # can change. One second collapses a burst of polls into a single broker fetch
 # and still reads as live to a human. Set KOTAK_FUNDS_CACHE_TTL=0 to disable.
@@ -176,15 +204,35 @@ def _fetch_funds(auth_token):
         # (09-portfolio-limits.md §5). The previous formula summed
         # RmsPayInAmt / RmsPayOutAmt / Collateral, none of which the doc lists,
         # so all three silently evaluated to zero.
-        net_available = float(margin_data.get("Net", 0))
-        collateral_value = float(margin_data.get("CollateralValue", 0))
-        margin_used = float(margin_data.get("MarginUsed", 0))
+        net_available = safe_float(margin_data.get("Net"))
+
+        # `collateral` must be the PLEDGED-SECURITIES collateral ONLY, matching
+        # Flattrade's `brkcollamt` (broker/flattrade/api/funds.py#_fetch_funds).
+        #
+        # Kotak's `CollateralValue` is the TOTAL collateral value and equals
+        # `Net` on a cash-only account (verified live: both 2006.59 with
+        # MarginUsed 0). Mapping it here made the app's PnL - which is
+        # `collateral + m2mrealized + m2munrealized`
+        # (docs/openalgo-api-contract.md §2.1) - display the account BALANCE as
+        # profit: the dashboard showed P&L +2006.59 with both M2M legs at 0.00.
+        # `Collateral` is the securities-only figure (0 when nothing is pledged),
+        # which is what Flattrade's brkcollamt reports.
+        collateral_value = safe_float(margin_data.get("Collateral"))
+        margin_used = safe_float(margin_data.get("MarginUsed"))
+
+        # PnL is computed from the POSITION BOOK rather than read off the limits
+        # reply, because Kotak's `rpnl` is inaccurate for closed positions
+        # (PR marketcalls/openalgo#1224). The limits reply's own MTOM fields are
+        # kept as the fallback for every case where positions cannot be used.
+        total_realised, total_unrealised = _pnl_from_positions(
+            auth_token, margin_data
+        )
 
         processed_margin_data = {
             "availablecash": f"{net_available:.2f}",
             "collateral": f"{collateral_value:.2f}",
-            "m2munrealized": f"{float(margin_data.get('UnrealizedMtomPrsnt', 0)):.2f}",
-            "m2mrealized": f"{float(margin_data.get('RealizedMtomPrsnt', 0)):.2f}",
+            "m2munrealized": f"{total_unrealised:.2f}",
+            "m2mrealized": f"{total_realised:.2f}",
             "utiliseddebits": f"{margin_used:.2f}",
         }
 
@@ -196,6 +244,169 @@ def _fetch_funds(auth_token):
         # raise straight through to the Flask request thread.
         logger.error(f"Error processing margin data: {e}")
         return {}
+
+
+def _position_symbol(position):
+    """Resolve one Kotak position row to (openalgo_symbol, exchange).
+
+    `tok` is NOT a documented positions field (07-portfolio-positions.md §5
+    lists trdSym/sym, not tok), so a token-only lookup silently fails for every
+    row. Resolve from the trading symbol first and use the token only when the
+    broker happens to include it - the same order as
+    api/order_api.py#_resolve_position_symbol.
+    """
+    from broker.kotak.mapping.transform_data import map_exchange
+    from database.token_db import get_oa_symbol, get_symbol
+
+    exchange = map_exchange(position.get("exSeg"))
+    if not exchange:
+        return None, None
+
+    token = str(position.get("tok") or "").strip()
+    if token:
+        mapped = get_symbol(token, exchange)
+        if mapped:
+            return mapped, exchange
+
+    broker_symbol = position.get("trdSym") or position.get("sym") or ""
+    if broker_symbol:
+        mapped = get_oa_symbol(broker_symbol, exchange)
+        if mapped:
+            return mapped, exchange
+
+    return None, exchange
+
+
+def _pnl_from_positions(auth_token, margin_data):
+    """Realized + unrealized PnL computed from the position book.
+
+    Ported from PR marketcalls/openalgo#1224. Kotak's limits reply carries
+    `RealizedMtomPrsnt` / `UnrealizedMtomPrsnt`, but its `rpnl` is inaccurate for
+    closed positions, so the position book is the better source when it is
+    readable.
+
+    Returns (realised, unrealised). Falls back to the limits reply's own MTOM
+    fields whenever the book cannot be read, is empty, or yields no usable LTP -
+    a wrong number is worse than the broker's own number.
+    """
+    api_realised = safe_float(margin_data.get("RealizedMtomPrsnt"))
+    api_unrealised = safe_float(margin_data.get("UnrealizedMtomPrsnt"))
+
+    try:
+        # Imported here to avoid a circular import at module load.
+        from broker.kotak.api.order_api import BrokerReadError, _read_book, get_positions
+
+        try:
+            positions = _read_book(get_positions(auth_token), "Kotak position book")
+        except BrokerReadError as error:
+            logger.warning(f"Funds PnL: {error}; using API-provided PnL")
+            return api_realised, api_unrealised
+
+        if not positions:
+            # An empty book is a real answer: no positions, no position-based PnL.
+            return api_realised, api_unrealised
+
+        # --- Batch-fetch LTP for every OPEN position -------------------------
+        symbols_to_fetch = []
+        for position in positions:
+            net_qty = (
+                safe_int(position.get("flBuyQty")) - safe_int(position.get("flSellQty"))
+            ) + (safe_int(position.get("cfBuyQty")) - safe_int(position.get("cfSellQty")))
+            if net_qty == 0:
+                continue
+            symbol, exchange = _position_symbol(position)
+            if symbol and exchange:
+                symbols_to_fetch.append({"symbol": symbol, "exchange": exchange})
+
+        ltp_map = {}
+        ltp_failed = False
+        if symbols_to_fetch:
+            try:
+                from broker.kotak.api.data import BrokerData
+
+                quotes = BrokerData(auth_token).get_multiquotes(symbols_to_fetch)
+                for item in quotes or []:
+                    data = item.get("data") or {}
+                    ltp = safe_float(data.get("ltp"))
+                    if ltp > 0:
+                        ltp_map[f"{item.get('symbol')}_{item.get('exchange')}"] = ltp
+                if not ltp_map:
+                    logger.warning("Funds PnL: batch LTP returned no usable data")
+                    ltp_failed = True
+            except Exception as error:
+                logger.warning(f"Funds PnL: batch LTP failed ({error})")
+                ltp_failed = True
+
+        # --- Realized + unrealized per position ------------------------------
+        total_realised = 0.0
+        total_unrealised = 0.0
+        needing_ltp = 0
+        missing_ltp = 0
+
+        for position in positions:
+            fl_buy_qty = safe_int(position.get("flBuyQty"))
+            fl_sell_qty = safe_int(position.get("flSellQty"))
+            cf_buy_qty = safe_int(position.get("cfBuyQty"))
+            cf_sell_qty = safe_int(position.get("cfSellQty"))
+            net_qty = (fl_buy_qty - fl_sell_qty) + (cf_buy_qty - cf_sell_qty)
+
+            total_buy_amt = safe_float(position.get("buyAmt")) + safe_float(
+                position.get("cfBuyAmt")
+            )
+            total_sell_amt = safe_float(position.get("sellAmt")) + safe_float(
+                position.get("cfSellAmt")
+            )
+            total_buy_qty = fl_buy_qty + cf_buy_qty
+            total_sell_qty = fl_sell_qty + cf_sell_qty
+
+            if net_qty == 0:
+                # Fully closed: the amount difference IS the realized PnL.
+                if total_buy_amt > 0 or total_sell_amt > 0:
+                    total_realised += total_sell_amt - total_buy_amt
+                continue
+
+            # Partially closed: realize the closed portion only.
+            if total_sell_qty > 0 and total_buy_qty > 0:
+                if net_qty > 0:
+                    avg_buy = total_buy_amt / total_buy_qty if total_buy_qty else 0.0
+                    total_realised += total_sell_amt - (avg_buy * total_sell_qty)
+                else:
+                    avg_sell = total_sell_amt / total_sell_qty if total_sell_qty else 0.0
+                    total_realised += (avg_sell * total_buy_qty) - total_buy_amt
+
+            # Unrealized on the still-open quantity.
+            if net_qty > 0:
+                avg_price = total_buy_amt / total_buy_qty if total_buy_qty else 0.0
+            else:
+                avg_price = total_sell_amt / total_sell_qty if total_sell_qty else 0.0
+
+            symbol, exchange = _position_symbol(position)
+            ltp = ltp_map.get(f"{symbol}_{exchange}", 0.0) if symbol else 0.0
+            needing_ltp += 1
+            if ltp <= 0:
+                missing_ltp += 1
+                continue
+            if avg_price > 0:
+                total_unrealised += (ltp - avg_price) * net_qty
+
+        # If not one open position could be priced, the position-based
+        # unrealized figure is meaningless - use the broker's own.
+        if ltp_failed or (needing_ltp > 0 and missing_ltp == needing_ltp):
+            logger.warning(
+                f"Funds PnL: no usable LTP for {missing_ltp}/{needing_ltp} open "
+                "positions; using API-provided unrealized PnL"
+            )
+            total_unrealised = api_unrealised
+
+        logger.info(
+            f"Funds PnL from positions - realized={total_realised:.2f} "
+            f"unrealized={total_unrealised:.2f}"
+        )
+        return total_realised, total_unrealised
+
+    except Exception as error:
+        logger.exception(f"Funds PnL: position-based calculation failed ({error})")
+        return api_realised, api_unrealised
 
 
 def get_margin_data(auth_token):
