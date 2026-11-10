@@ -522,95 +522,124 @@ class BrokerData:
             logger.warning("No valid queries to fetch quotes for")
             return skipped_symbols
 
-        # Build comma-separated query string
-        combined_query = ",".join(queries)
-
-        logger.info(f"Requesting quotes for {len(queries)} instruments")
-        logger.debug(
-            f"Combined query: {combined_query[:200]}..."
-            if len(combined_query) > 200
-            else f"Combined query: {combined_query}"
-        )
+        # Kotak caps each neosymbol request at 50 symbols ("Please set the Neo
+        # symbol max value to 50."), so a chain request — which routinely wants
+        # 60+ CE/PE legs — must be chunked even though get_multiquotes already
+        # splits at 50. A single call here would otherwise hit the cap and the
+        # whole chain fails at the engine.
+        #
+        # 50 is the hard ceiling, not a safe size: Kotak returns the 400 for a
+        # 50-symbol request exactly at that count, so keep the chunk comfortably
+        # below the cap. 40 keeps every request well under the limit while
+        # leaving a large chain at 2-3 requests.
+        MAX_SYMBOLS_PER_REQUEST = 40
 
         # Make API request using existing method (handles URL encoding)
-        response_data = self._make_quotes_request(combined_query, "all")
-        if response_data is None:
-            logger.error(f"API Error: {self.last_quote_error}")
-            raise Exception(f"API Error: {self.last_quote_error}")
-
-        # Parse response and build results
         results = []
+        for start in range(0, len(queries), MAX_SYMBOLS_PER_REQUEST):
+            chunk = queries[start : start + MAX_SYMBOLS_PER_REQUEST]
+            combined_query = ",".join(chunk)
 
-        if not response_data or not isinstance(response_data, list):
-            logger.warning("Empty or invalid response from API")
-            return results
+            logger.info(f"Requesting quotes for {len(chunk)} instruments")
+            logger.debug(
+                f"Combined query: {combined_query[:200]}..."
+                if len(combined_query) > 200
+                else f"Combined query: {combined_query}"
+            )
 
-        # Build lookup by query for response matching
-        # Response items have 'exchange' and 'exchange_token' or 'display_symbol'
-        response_lookup = {}
-        for quote in response_data:
-            # Build possible keys to match
-            exch = quote.get("exchange", "")
-            token = quote.get("exchange_token", "")
-            display = quote.get("display_symbol", "")
+            response_data = self._make_quotes_request(combined_query, "all")
+            if response_data is None:
+                logger.error(f"API Error: {self.last_quote_error}")
+                raise Exception(f"API Error: {self.last_quote_error}")
 
-            # Try to match with original query format
-            key1 = f"{exch}|{token}"
-            key2 = f"{exch}|{display.replace('-EQ', '').replace('-IN', '')}" if display else None
+            if not response_data or not isinstance(response_data, list):
+                logger.warning("Empty or invalid response from API")
+                return results
 
-            response_lookup[key1] = quote
-            if key2:
-                response_lookup[key2] = quote
+            # Build lookup by query for response matching
+            # Response items have 'exchange' and 'exchange_token' or 'display_symbol'
+            response_lookup = {}
+            for quote in response_data:
+                # Build possible keys to match
+                exch = quote.get("exchange", "")
+                token = quote.get("exchange_token", "")
+                display = quote.get("display_symbol", "")
 
-        # Build results from query_map
-        for query, original in query_map.items():
-            # Try to find matching quote in response
-            quote_data = response_lookup.get(query)
+                # Try to match with original query format
+                key1 = f"{exch}|{token}"
+                key2 = f"{exch}|{display.replace('-EQ', '').replace('-IN', '')}" if display else None
 
-            # If not found, try variations
-            if not quote_data:
-                for resp_key, resp_quote in response_lookup.items():
-                    if query.lower() == resp_key.lower():
-                        quote_data = resp_quote
-                        break
+                response_lookup[key1] = quote
+                if key2:
+                    response_lookup[key2] = quote
 
-            if not quote_data:
-                logger.warning(f"No quote data found for {original['symbol']} ({query})")
-                results.append(
-                    {
-                        "symbol": original["symbol"],
-                        "exchange": original["exchange"],
-                        "error": "No quote data available",
-                    }
-                )
-                continue
+            # Build results from this chunk of the query_map
+            for query in chunk:
+                original = query_map[query]
+                # Try to find matching quote in response
+                quote_data = response_lookup.get(query)
 
-            # Parse and format quote data
-            ohlc_data = quote_data.get("ohlc", {})
-            depth_data = quote_data.get("depth") or {}  # Guard against null depth
-            buy_orders = depth_data.get("buy", [])
-            sell_orders = depth_data.get("sell", [])
+                # If not found, try variations
+                if not quote_data:
+                    for resp_key, resp_quote in response_lookup.items():
+                        if query.lower() == resp_key.lower():
+                            quote_data = resp_quote
+                            break
 
-            ltp = float(quote_data.get("ltp", 0))
-            bid_price = float(buy_orders[0].get("price", 0)) if buy_orders else ltp
-            ask_price = float(sell_orders[0].get("price", 0)) if sell_orders else ltp
+                if not quote_data:
+                    logger.warning(f"No quote data found for {original['symbol']} ({query})")
+                    results.append(
+                        {
+                            "symbol": original["symbol"],
+                            "exchange": original["exchange"],
+                            "error": "No quote data available",
+                        }
+                    )
+                    continue
 
-            result_item = {
-                "symbol": original["symbol"],
-                "exchange": original["exchange"],
-                "data": {
-                    "bid": bid_price,
-                    "ask": ask_price,
-                    "open": float(ohlc_data.get("open", 0)),
-                    "high": float(ohlc_data.get("high", 0)),
-                    "low": float(ohlc_data.get("low", 0)),
-                    "ltp": ltp,
-                    "prev_close": float(ohlc_data.get("close", 0)),
-                    "volume": float(quote_data.get("last_volume", 0)),
-                    "oi": int(quote_data.get("open_int", 0)),
-                },
-            }
-            results.append(result_item)
+                # Parse and format quote data
+                ohlc_data = quote_data.get("ohlc", {})
+                depth_data = quote_data.get("depth") or {}  # Guard against null depth
+                buy_orders = depth_data.get("buy", [])
+                sell_orders = depth_data.get("sell", [])
+
+                ltp = float(quote_data.get("ltp", 0))
+                bid_price = float(buy_orders[0].get("price", 0)) if buy_orders else ltp
+                ask_price = float(sell_orders[0].get("price", 0)) if sell_orders else ltp
+
+                # `tick_size` is part of the canonical quote shape the shared option
+                # chain builder consumes — Flattrade emits it from the broker's `ti`
+                # field (broker/flattrade/api/data.py#_fetch_single_quote_sync), so
+                # Kotak must expose the same key or the chain's leg rows carry a
+                # missing tick (defaults to 0 in the UI).
+                tick_size = None
+                try:
+                    from database.token_db import get_symbol_info
+
+                    info = get_symbol_info(original["symbol"], original["exchange"])
+                    raw = getattr(info, "tick_size", None)
+                    if raw is not None:
+                        tick_size = float(raw)
+                except Exception:
+                    tick_size = None
+
+                result_item = {
+                    "symbol": original["symbol"],
+                    "exchange": original["exchange"],
+                    "data": {
+                        "bid": bid_price,
+                        "ask": ask_price,
+                        "open": float(ohlc_data.get("open", 0)),
+                        "high": float(ohlc_data.get("high", 0)),
+                        "low": float(ohlc_data.get("low", 0)),
+                        "ltp": ltp,
+                        "prev_close": float(ohlc_data.get("close", 0)),
+                        "volume": float(quote_data.get("last_volume", 0)),
+                        "oi": int(quote_data.get("open_int", 0)),
+                        "tick_size": tick_size,
+                    },
+                }
+                results.append(result_item)
 
         # Include skipped symbols in results
         return skipped_symbols + results

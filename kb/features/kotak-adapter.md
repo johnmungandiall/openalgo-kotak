@@ -158,6 +158,11 @@ not allowed", order 260728000251866). The doc cannot settle the contradiction.
 readings — a converted SL still rests and triggers at the same price, and an
 unconverted SL-M would be dead on arrival. Do not "fix" it back to SL-M.
 
+## Option chain — mapped to the Flattrade format
+Both brokers run through the SAME chain builder (`services/option_chain_service.py#get_option_chain`), so the response shape is identical by construction: each strike row carries `ce`/`pe` legs with `symbol, label, ltp, bid, ask, bid_qty, ask_qty, open, high, low, prev_close, volume, oi, lotsize, tick_size`.
+
+The broker-specific piece is `get_multiquotes()` output. Flattrade emits `tick_size` in its quote dict (`broker/flattrade/api/data.py#_fetch_single_quote_sync`); Kotak was missing it, so chain legs showed `tick_size=0`. Fixed in `broker/kotak/api/data.py#_process_quotes_batch` — the quote dict now resolves `tick_size` from the master contract (`get_symbol_info`). Live-verified 2026-11-10: `/api/v1/optionchain` NIFTY 17NOV26 → `CE keys: symbol, label, ltp, bid, ask, bid_qty, ask_qty, open, high, low, prev_close, volume, oi, lotsize, tick_size`, with `tick=0.05` on both legs.
+
 ## The rule that generalises
 Same as Flattrade: a broker reply is **not always** the documented success
 payload. On failure it is the error object — a bare dict with `stat: "Not_Ok"` +

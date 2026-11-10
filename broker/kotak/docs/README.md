@@ -64,6 +64,13 @@ Option-leg history remains unavailable (Yahoo carries no Indian F&O), so the
 OI/IV/straddle charts that need option legs still degrade to empty — see
 [`02-not-fixable.md`](02-not-fixable.md) N1.
 
+**Option chain** matches the Flattrade format — both brokers run through the same
+builder (`services/option_chain_service.py#get_option_chain`), so the only
+broker-specific gap was `tick_size` missing from Kotak's multiquote quote dict
+(`broker/kotak/api/data.py#_process_quotes_batch`); added from the master
+contract. Live-verified 2026-11-10: NIFTY 17NOV26 chain legs carry the full
+CE/PE field set including `tick_size`.
+
 R5 is the one area where Kotak is **better** than Flattrade: the order-update
 adapter (`broker/kotak/streaming/kotak_order_adapter.py`) has a connect-ack
 watchdog and handshake-encoding alternation, and the market-data adapter
