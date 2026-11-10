@@ -26,7 +26,7 @@ separated here.
 | Document | Covers | Count | Status |
 | --- | --- | --- | --- |
 | [`01-fixable-defects.md`](01-fixable-defects.md) | Defects with a fix that the official docs fully specify | 18 | **Implemented** |
-| [`02-not-fixable.md`](02-not-fixable.md) | Items the official API cannot support, or that contradict it | 4 | Open (needs live session) |
+| [`02-not-fixable.md`](02-not-fixable.md) | Items the official API cannot support, or that contradict it | 4 | N1 **resolved** (Yahoo fallback); N2–N4 open |
 
 ## Evidence standard
 
@@ -57,8 +57,12 @@ in the two documents; this is the summary.
 | R6 | Funds correctness + load control | Partial | **Pass** | K5, K6, K16 |
 | R7 | No credentials in logs | Fail | **Pass** | K12 |
 
-R1 stays short of a full pass only because historical data has no endpoint at
-all (N1) — the order-placement half of R1 is now complete.
+R1 is now complete for order placement **and** for index/equity history, which
+arrives via the Yahoo Finance fallback ported from PR
+[`marketcalls/openalgo#1466`](https://github.com/marketcalls/openalgo/pull/1466).
+Option-leg history remains unavailable (Yahoo carries no Indian F&O), so the
+OI/IV/straddle charts that need option legs still degrade to empty — see
+[`02-not-fixable.md`](02-not-fixable.md) N1.
 
 R5 is the one area where Kotak is **better** than Flattrade: the order-update
 adapter (`broker/kotak/streaming/kotak_order_adapter.py`) has a connect-ack

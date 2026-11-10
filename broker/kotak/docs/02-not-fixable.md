@@ -1,34 +1,49 @@
 # Kotak adapter — not fixable from the official API
 
-4 items that cannot be closed by a code change, because the official Kotak Neo
-Trade API v2 documentation does not provide what the fix would need — or
-contradicts the behaviour the code depends on.
+4 items that could not be closed by a code change against the official Kotak
+Neo Trade API v2 documentation, because it does not provide what the fix would
+need — or contradicts the behaviour the code depends on.
 
 Each entry states what is missing, what was checked to establish that it is
 missing, what the consequence is, and what would unblock it. "Not fixable" here
-means **not fixable from the documentation**, not "impossible forever": three of
-the four have a named unblock, and one of those is already available in this
-codebase.
+means **not fixable from the documentation**, not "impossible forever" — and
+that distinction has already paid off: **N1 is now resolved** by sourcing
+candles from outside the broker (PR #1466), which is exactly the kind of
+unblock this document was written to name.
 
-**The 18 fixable defects are now implemented** (see
-[`01-fixable-defects.md`](01-fixable-defects.md)). The 4 items below remain
-open because no code change can close them — each needs a live Kotak session or
-a different data source.
+**The 18 fixable defects are implemented** (see
+[`01-fixable-defects.md`](01-fixable-defects.md)). Of the 4 items below, N1 is
+resolved; N2–N4 remain open because each needs a live Kotak session or an
+account setting, not a code change.
 
 ## Index
 
-| ID | Item | Req | Blocked by |
-| --- | --- | --- | --- |
-| N1 | Historical data — `get_history` returns an empty DataFrame | R1 | No candle endpoint in the API |
-| N2 | Open interest — the response field name is undocumented | R1 | Doc lists `oi` as a filter, never as a field |
-| N3 | SL-M — the doc permits it, live Kotak rejects it | R1 | Doc and live behaviour contradict |
-| N4 | Static IP whitelisting | — | Operational, not code |
+| ID | Item | Req | Blocked by | Status |
+| --- | --- | --- | --- | --- |
+| N1 | Historical data — `get_history` returns an empty DataFrame | R1 | No candle endpoint in the API | **RESOLVED** — Yahoo fallback (PR #1466) |
+| N2 | Open interest — the response field name is undocumented | R1 | Doc lists `oi` as a filter, never as a field | Open |
+| N3 | SL-M — the doc permits it, live Kotak rejects it | R1 | Doc and live behaviour contradict | Open (not a defect) |
+| N4 | Static IP whitelisting | — | Operational, not code | Open |
 
 ---
 
-## N1 — Historical data: `get_history` returns an empty DataFrame
+## N1 — Historical data: RESOLVED via the Yahoo Finance fallback
 
-**Req:** R1 · **Blocked by:** the API has no historical-candle endpoint
+**Req:** R1 · **Was blocked by:** the API has no historical-candle endpoint
+
+> **Status: resolved.** Implemented from PR
+> [`marketcalls/openalgo#1466`](https://github.com/marketcalls/openalgo/pull/1466).
+> `broker/kotak/api/data.py#get_history` now sources candles from the free Yahoo
+> Finance chart API for **indices and cash equities**. Option/future legs still
+> return an empty frame — Yahoo does not carry Indian F&O — so the OI/IV/straddle
+> charts that need option legs remain unavailable. Verified live: `NIFTY` → 6
+> daily candles, `RELIANCE` → 6 daily candles, `NIFTY26NOV25000CE` → empty.
+> Tests: `test/test_kotak_history.py` (20 passing).
+>
+> The original analysis is kept below because it explains *why* a fallback was
+> needed and what the remaining gap is.
+
+### Original analysis (kept for context)
 
 **Code.** `broker/kotak/api/data.py#get_history`
 
@@ -84,7 +99,7 @@ supply history.
 **Why a code change cannot fix it.** There is nothing to call. Any fix must
 introduce a data source that is not Kotak.
 
-**What would unblock it — three options, in order of fit**
+**What unblocked it — option 2 was taken**
 
 1. **Historify backfill (already in the codebase, no new dependency).**
    `services/history_service.py#get_history` already accepts `source="db"` and
@@ -112,9 +127,16 @@ introduce a data source that is not Kotak.
    exist outside the mirrored set. This is the only option that would make
    `get_history` genuinely work, and it is not something code can settle.
 
-**Recommendation.** Option 1. It is the path the codebase already has, it needs
-no new dependency, and it does not silently produce wrong numbers the way a
-partial Yahoo fallback would.
+**What was actually chosen.** Option 2, per the user's instruction to follow PR
+#1466. The PR's own scoping is what keeps it honest: `_yahoo_ticker` returns
+`None` for anything Yahoo does not carry, so an option leg degrades to an empty
+frame instead of silently returning the underlying's prices under an option's
+name. The residual gap is real and documented above — option-leg history is
+still unavailable.
+
+Option 1 (Historify backfill) remains the better long-term answer for option
+legs, and the two are not exclusive: the Yahoo fallback covers the underlying
+series today, and a backfill would cover the legs.
 
 ---
 
@@ -256,7 +278,7 @@ is K11.
 
 | ID | Permanently blocked? | Unblock |
 | --- | --- | --- |
-| N1 | No | Historify backfill (in-repo), or a Kotak history endpoint, or a partial Yahoo fallback |
+| N1 | No | **DONE** — Yahoo fallback (PR #1466) for indices + cash equities; option legs still need Historify backfill |
 | N2 | No | One live authenticated quotes call to read the real OI key |
 | N3 | No | One live SL-M placement to settle doc-vs-broker |
 | N4 | No | User registers the IP on the dashboard |

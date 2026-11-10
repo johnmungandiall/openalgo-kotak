@@ -5,9 +5,10 @@ requirements that Flattrade meets. The assessment is split into what a code
 change can close and what the official API cannot support, in
 `broker/kotak/docs/`.
 
-**All 18 fixable defects (K1–K18) are now IMPLEMENTED and verified.** The 4
-not-fixable items (N1–N4) remain open — they need a live Kotak session or a
-different data source, not a code change.
+**All 18 fixable defects (K1–K18) are IMPLEMENTED and verified.** Of the 4
+not-fixable items, **N1 (historical data) is now RESOLVED** via the Yahoo
+Finance fallback ported from PR `marketcalls/openalgo#1466`. N2–N4 remain open —
+they need a live Kotak session, not a code change.
 
 ## Read this first
 - `broker/kotak/docs/README.md` — requirement mapping (R1–R7), reading order,
@@ -41,16 +42,18 @@ all (N1) — the order-placement half of R1 is complete.
 | `broker/kotak/mapping/order_data.py` | K11 |
 | `broker/kotak/mapping/margin_data.py` | K17 |
 | `broker/kotak/api/auth_api.py` | K12 |
-| `broker/kotak/api/data.py` | K12, K16 |
+| `broker/kotak/api/data.py` | K12, K16, **N1 (Yahoo history)** |
 | `test/test_kotak_adapter_fixes.py` (new) | verification for all 18 |
+| `test/test_kotak_history.py` (new) | verification for N1 |
 
 ## Verification
 ```
 .venv/Scripts/python.exe -m pytest test/test_kotak_adapter_fixes.py -q  -> 22 passed
+.venv/Scripts/python.exe -m pytest test/test_kotak_history.py -q        -> 20 passed
 .venv/Scripts/python.exe -m pytest test/test_smartorder_logic.py -q      -> 204 passed
 ```
-The 22 tests exercise the real functions with the broker boundary
-monkeypatched, so a guard regression fails there rather than in production.
+The tests exercise the real functions with the broker/HTTP boundary
+monkeypatched, so a regression fails there rather than in production.
 
 R5 is the one area where Kotak is **better** than Flattrade: the order-update
 adapter has a connect-ack watchdog + handshake-encoding alternation, and the
@@ -73,16 +76,36 @@ subscribe and partial-update merging. Flattrade polls REST for order updates.
   book it could not see. Kotak's empty marker differs from Flattrade's: `stat:
   "Ok"` with an empty/absent `data`, not a `"no data"` emsg.
 
-## The two silent-wrong-answer items (N1, N2)
-Both look like data, not errors — which is why they are documented rather than
-left as known limitations.
-- **N1 historical data** — the API has **no candle endpoint**. Only scrip-master
-  CSV links and a current quote snapshot. `api/data.py#get_history` returns an
-  empty DataFrame and `services/history_service.py#get_history_with_auth`
-  reports it as `success` with zero rows, so charts render empty. Unblock:
-  Historify backfill (`get_history(source="db")` already exists), or a Kotak
-  history endpoint. Yahoo covers equity/index only — `RELIANCE.NS` and `^NSEI`
-  work, `NIFTY26NOV25000CE.NS` is **404**, so option legs are not covered.
+## N1 historical data — RESOLVED (Yahoo fallback)
+Kotak Neo has **no candle endpoint** (only scrip-master CSV links and a current
+quote snapshot), so `api/data.py#get_history` used to return an empty frame and
+`services/history_service.py#get_history_with_auth` reported it as `success`
+with zero rows — charts rendered empty.
+
+Ported from PR `marketcalls/openalgo#1466`. `api/data.py#get_history` now sources
+candles from the free Yahoo Finance chart API:
+- `timeframe_map` — `1m/5m/15m/30m/1h/D` → Yahoo `1m/5m/15m/30m/60m/1d`.
+  `services/intervals_service.py#get_intervals_with_auth` derives `/intervals`
+  from this map, so the map is what makes that endpoint work.
+- `_yahoo_ticker` — `NSE`→`.NS`, `BSE`→`.BO`, plus `NIFTY`→`^NSEI`,
+  `BANKNIFTY`→`^NSEBANK`, `SENSEX`→`^BSESN`. Returns `None` for F&O/currency/
+  commodities so an option leg degrades to empty rather than fetching the wrong
+  instrument.
+- `_ist_midnight_epoch` — IST-midnight epoch boundaries, `end=True` returns the
+  next day so the end date is inclusive.
+- `get_history` skips null gap candles, de-dupes, sorts and clamps to the window.
+
+**Verified live:** `NIFTY` → 6 daily candles, `RELIANCE` → 6 daily candles,
+`NIFTY26NOV25000CE` → empty (no request issued). Tests:
+`test/test_kotak_history.py` (20 passing).
+
+**Residual gap:** Yahoo carries no Indian F&O, so option-leg history is still
+unavailable — the OI/IV/straddle charts that need legs still degrade to empty.
+Historify backfill (`get_history(source="db")`) remains the answer for those.
+
+## N2 open interest — still open
+Looks like data, not an error, which is why it is documented rather than left as
+a known limitation.
 - **N2 open interest** — `05-market-data-quotes.md` lists `oi` as a **filter**
   you can request, never as a response **field**. `api/data.py#get_quotes` reads
   `open_int`, a guess. Every OI is silently 0, so
