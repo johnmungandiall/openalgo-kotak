@@ -31,7 +31,7 @@ logger = get_logger(__name__)
 # A genuinely empty book is stat "Ok" with an empty (or absent) data array: the
 # doc says "Only positions with actual trades for the day will be listed", so an
 # empty array is a normal answer. Every other non-Ok reply is a READ FAILURE.
-_EMPTY_BOOK_MARKERS = ("no data",)
+_EMPTY_BOOK_MARKERS = ("no data", "data not found")
 
 
 class BrokerReadError(Exception):
@@ -50,7 +50,17 @@ def _is_empty_book_response(response):
     """True only when a Not_Ok reply specifically means "there are no rows"."""
     if not isinstance(response, dict) or response.get("stat") != "Not_Ok":
         return False
-    emsg = str(response.get("emsg") or response.get("message") or "").lower()
+    # Kotak puts the human-readable error in `emsg` in the docs, but the live
+    # API answers a flat positions book with `errMsg` + `desc` ("No Data" /
+    # "data not found"). Check all four spellings so a flat account reads as
+    # EMPTY, not as unreadable.
+    emsg = str(
+        response.get("emsg")
+        or response.get("message")
+        or response.get("errMsg")
+        or response.get("desc")
+        or ""
+    ).lower()
     return any(marker in emsg for marker in _EMPTY_BOOK_MARKERS)
 
 

@@ -110,7 +110,12 @@ subscribe and partial-update merging. Flattrade polls REST for order updates.
 - **K4** `_read_book` + `BrokerReadError` distinguish empty from unreadable;
   `get_open_position` propagates the error so a smart order never trades on a
   book it could not see. Kotak's empty marker differs from Flattrade's: `stat:
-  "Ok"` with an empty/absent `data`, not a `"no data"` emsg.
+  "Ok"` with an empty/absent `data`, not a `"no data"` emsg. **Live shape**
+  (2026-11-10): a flat account answers `{"stCode":5203, "errMsg":"No Data",
+  "desc":"data not found", "stat":"Not_Ok"}` — `_is_empty_book_response` now
+  also folds `errMsg`/`desc` into the marker scan, so the flat book reads as
+  `[]` instead of raising and forcing a false "read failed" fallback on every
+  funds poll.
 
 ## N1 historical data — RESOLVED (Yahoo fallback)
 Kotak Neo has **no candle endpoint** (only scrip-master CSV links and a current

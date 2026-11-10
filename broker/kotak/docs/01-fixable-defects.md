@@ -220,6 +220,17 @@ Kotak's empty marker differs from Flattrade's: Kotak signals an empty book
 with `stat: "Ok"` and an empty or absent `data` array, not with a `"no data"`
 `emsg`. The marker list must be written for Kotak, not copied.
 
+**Live finding (2026-11-10, verified).** A FLAT Kotak account answers
+`/quick/user/positions` with `{"stCode": 5203, "errMsg": "No Data", "desc":
+"data not found", "stat": "Not_Ok"}` — the error field is `errMsg`/`desc`,
+not the doc's `emsg`. `_is_empty_book_response` originally checked only
+`emsg`/`message`, so this shape raised `BrokerReadError` and the funds PnL
+path fell back to API-provided numbers on every poll with a misleading
+"read failed (unknown error)" warning. `_is_empty_book_response` now folds
+`errMsg` + `desc` into the marker scan (markers: `no data`, `data not
+found`), so a flat book reads as `[]` exactly like the documented empty
+shape.
+
 ---
 
 ## K5 — Funds reads three field names the doc does not define

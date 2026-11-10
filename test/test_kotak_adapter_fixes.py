@@ -362,3 +362,31 @@ def test_rate_limiter_allows_burst_then_throttles():
     # The next one must wait.
     assert rate_limit.reserve_slot() > 0.0
     rate_limit.reset_rate_limit()
+
+
+def test_read_book_treats_live_flat_positions_reply_as_empty():
+    """K4 regression, live shape: a flat Kotak account answers /positions with
+    {'stCode': 5203, 'errMsg': 'No Data', 'desc': 'data not found',
+     'stat': 'Not_Ok'} — the LIVE reply uses errMsg/desc, not the doc's emsg.
+    That shape must read as EMPTY ([]), not raise BrokerReadError, or the funds
+    PnL path falls back to API-provided numbers on every poll with a false
+    'read failed' warning."""
+    live_flat_reply = {
+        "stCode": 5203,
+        "errMsg": "No Data",
+        "desc": "data not found",
+        "stat": "Not_Ok",
+    }
+    assert order_api._is_empty_book_response(live_flat_reply) is True
+    assert order_api._read_book(live_flat_reply, "Kotak position book") == []
+    # The documented emsg spelling still reads empty.
+    assert order_api._read_book(
+        {"stat": "Not_Ok", "emsg": "no data"}, "book"
+    ) == []
+    # A non-empty Not_Ok must STILL raise.
+    import pytest as _pytest
+
+    with _pytest.raises(order_api.BrokerReadError):
+        order_api._read_book(
+            {"stat": "Not_Ok", "emsg": "Session Expired"}, "book"
+        )
