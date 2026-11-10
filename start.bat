@@ -14,7 +14,7 @@ tzutil /s "India Standard Time"
 w32tm /resync
 
 :: Start OpenAlgo
-cd /d "C:\Users\John\Downloads\New folder\openalgo2-dev\openalgo2-dev"
+cd /d "C:\Users\John\Downloads\qwantonomous-flattrade-fix-1.0.3\qwantonomous-flattrade-fix-1.0.3"
 uv run app.py
 
 pause
