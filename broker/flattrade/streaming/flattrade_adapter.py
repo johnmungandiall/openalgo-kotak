@@ -360,7 +360,7 @@ class FlattradeWebSocketAdapter(BaseBrokerWebSocketAdapter):
         # Auth-failure retry counter - deliberately SEPARATE from and much
         # tighter-bounded than reconnect_attempts/Config.MAX_RECONNECT_ATTEMPTS
         # above, which are for ordinary network drops. This gives the daily
-        # ~3 AM IST token rollover a few chances to self-heal via a fresh DB
+        # 5–6 AM IST token rollover a few chances to self-heal via a fresh DB
         # read (_attempt_reconnection() already calls get_auth_token with
         # bypass_cache=True before rebuilding the ws client - reused as-is,
         # not duplicated here), but stops well short of the full 10-attempt
@@ -998,7 +998,7 @@ class FlattradeWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self._retire_client()
 
                 # Re-read fresh auth token from database before reconnecting.
-                # Flattrade tokens roll over daily at ~3 AM IST; reusing the
+                # Flattrade tokens roll over daily at 5–6 AM IST; reusing the
                 # construction-time token would reconnect with a dead token.
                 fresh_token = get_auth_token(self.user_id, bypass_cache=True)
                 if fresh_token:

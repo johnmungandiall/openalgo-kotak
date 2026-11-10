@@ -720,9 +720,9 @@ gap is explicit rather than discovered later.
 ## 11. Discrepancies found while mapping
 
 Each is a real difference between the official contract and the adapter, read
-from both sides. **Seven were closed by code fixes on 2026-11-10** (11.1,
-11.4, 11.6, 11.7, 11.8, 11.10, 11.11); the rest are recorded so the decision
-is visible.
+from both sides. **Eight were closed by code fixes on 2026-11-10** (11.1,
+11.2, 11.4, 11.6, 11.7, 11.8, 11.10, 11.11); the rest are recorded so the
+decision is visible.
 
 ### 11.1 Auth response field name — **FIXED**
 
@@ -730,11 +730,13 @@ Official response uses **`status`** (`{ "token", "client", "status": "Ok", "emsg
 `api/auth_api.py#authenticate_broker` used to check **`stat`**; it now accepts
 both `stat` and `status`, so a healthy reply can never read as an auth failure.
 
-### 11.2 Token rollover window
+### 11.2 Token rollover window — **FIXED**
 
-Official: cleared **5 AM – 6 AM**. Adapter comment and the broker-integration
-reference both say **~3 AM IST**. Behaviour is unaffected (the token is re-read
-on every reconnect), but the comment is wrong. **Severity: cosmetic.**
+Official: cleared **5 AM – 6 AM**. The adapter comments (`flattrade_adapter.py#
+_setup_connection_management`, `#_attempt_reconnection`) said **~3 AM IST**;
+they now state 5–6 AM IST. The shared `broker-integration/references/auth-and-
+login.md` still says ~3 AM for Indian brokers in general — left untouched (it is
+not Flattrade-specific). **Severity was cosmetic.**
 
 ### 11.3 `mkt_protection` is not an official field
 

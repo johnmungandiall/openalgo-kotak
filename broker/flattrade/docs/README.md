@@ -26,7 +26,7 @@ break a strategy engine:
 | Rejects a raw `MKT` / `SL-MKT` for API orders | Every MARKET entry and every square-off is dead on arrival | `mapping/transform_data.py#transform_data` |
 | A book read can answer with a bare `{"stat":"Not_Ok"}` **dict** instead of a list | Indexing/iterating it raises, the service layer turns that into HTTP 500 | `api/order_api.py#_read_book` |
 | One WebSocket connection per user id | A dedicated order-update socket evicts the market-data socket | `services/order_update_service.py#_POLLING_BROKERS` |
-| Tokens roll over daily at ~3 AM IST | A long-lived socket reconnects with a dead token | `streaming/flattrade_adapter.py#_attempt_reconnection` |
+| Tokens roll over daily at 5–6 AM IST | A long-lived socket reconnects with a dead token | `streaming/flattrade_adapter.py#_attempt_reconnection` |
 | Account-wide rate limits (40/s, 200/min) | The busiest caller (funds) was the only one not counted | `api/data.py#_apply_rate_limit` |
 | Noren tokens are unique only **within** an exchange | Two instruments merge into one cache slot and publish each other's price | `streaming/flattrade_adapter.py#MarketDataCache` |
 

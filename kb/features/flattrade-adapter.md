@@ -41,7 +41,7 @@ Qwantonomous Engine's trading requirements. The full record lives in
   uses Flattrade's own format rather than an invented one.
 
 ### Discrepancies
-Seven order-path discrepancies were closed by code fixes on 2026-11-10 (tests:
+Eight order-path discrepancies were closed by code fixes on 2026-11-10 (tests:
 `test/test_flattrade_order_path_fixes.py`):
 - `api/order_api.py#place_order_api` now parses defensively — no more hard-indexed
   `response_data["stat"]` (KeyError → 500 on an HTML/proxy reply).
@@ -60,6 +60,8 @@ Seven order-path discrepancies were closed by code fixes on 2026-11-10 (tests:
 - `streaming/flattrade_websocket.py#_handle_auth_response` compares the auth ack
   case-insensitively, so the official `"Ok"` is accepted (the legacy constant
   was `"OK"`).
+- `streaming/flattrade_adapter.py` comments now state the official 5–6 AM IST
+  token-rollover window (they said ~3 AM).
 
 Still open (recorded, NOT fixed):
 - `mkt_protection` is sent on every order but is not an official field.

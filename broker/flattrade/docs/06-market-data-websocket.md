@@ -196,7 +196,7 @@ self.auth_refresh_retries = 0
 self.max_auth_refresh_retries = 3
 ```
 
-The reasoning, from the code comment: Flattrade tokens roll over daily at ~3 AM
+The reasoning, from the code comment: Flattrade tokens roll over daily at 5–6 AM
 IST, so an auth failure needs a few chances to self-heal via a fresh DB read —
 but it must stop well short of the full 50-attempt generic backoff, so a genuinely
 dead token is not hammered for many minutes against a possibly rate-limited IP
