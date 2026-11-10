@@ -5,6 +5,7 @@ import httpx
 import threading
 import time
 
+from broker.flattrade.api.data import _apply_rate_limit
 from broker.flattrade.mapping.order_data import normalize_order_status
 from broker.flattrade.mapping.transform_data import (
     MPPPriceUnavailable,
@@ -43,10 +44,21 @@ def get_api_response(endpoint, auth, method="GET", payload=""):
         headers = {"Content-Type": "application/json"}
 
     url = f"https://piconnect.flattrade.in{endpoint}"
+
+    # Account-wide budget - the order/read path must be counted against the
+    # same window as every other Flattrade call.
+    _apply_rate_limit()
     response = client.request(method, url, content=payload, headers=headers)
     data = response.text
 
-    return json.loads(data)
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, TypeError) as error:
+        logger.error(f"Flattrade non-JSON reply from {endpoint}: {error}")
+        return {
+            "stat": "Not_Ok",
+            "emsg": f"non-JSON reply (HTTP {response.status_code})",
+        }
 
 
 def get_order_book(auth):
@@ -293,14 +305,30 @@ def place_order_api(data, auth):
     client = get_httpx_client()
 
     url = "https://piconnect.flattrade.in/PiConnectAPI/PlaceOrder"
+
+    # Account-wide budget (official order-side limit is 10/s, 40/min; the
+    # shared account window is 38/s, 190/min).
+    _apply_rate_limit()
     res = client.post(url, content=payload, headers=headers)
-    response_data = res.json()
+
+    # The broker reply is not always the documented success payload: an edge
+    # proxy can answer with an HTML page, a gateway timeout with an empty
+    # body, and a failure with a bare {"stat": "Not_Ok", "emsg": ...} dict.
+    # Parse defensively so a malformed reply becomes a broker-shaped failure
+    # instead of a generic 500 (KeyError).
+    try:
+        response_data = res.json()
+    except (ValueError, TypeError):
+        response_data = {
+            "stat": "Not_Ok",
+            "emsg": f"non-JSON reply (HTTP {res.status_code})",
+        }
 
     # Add status attribute for backward compatibility
     res.status = res.status_code
 
-    if response_data["stat"] == "Ok":
-        orderid = response_data["norenordno"]
+    if isinstance(response_data, dict) and response_data.get("stat") == "Ok":
+        orderid = response_data.get("norenordno")
     else:
         orderid = None
     return res, response_data, orderid
@@ -670,8 +698,15 @@ def cancel_order(orderid, auth):
     client = get_httpx_client()
 
     url = "https://piconnect.flattrade.in/PiConnectAPI/CancelOrder"
+    _apply_rate_limit()
     res = client.post(url, content=payload, headers=headers)
-    data = res.json()
+    try:
+        data = res.json()
+    except (ValueError, TypeError):
+        data = {
+            "stat": "Not_Ok",
+            "emsg": f"non-JSON reply (HTTP {res.status_code})",
+        }
     logger.debug(f"{data}")
 
     # Check if the request was successful
@@ -714,8 +749,15 @@ def modify_order(data, auth):
     client = get_httpx_client()
 
     url = "https://piconnect.flattrade.in/PiConnectAPI/ModifyOrder"
+    _apply_rate_limit()
     res = client.post(url, content=payload, headers=headers)
-    response = res.json()
+    try:
+        response = res.json()
+    except (ValueError, TypeError):
+        response = {
+            "stat": "Not_Ok",
+            "emsg": f"non-JSON reply (HTTP {res.status_code})",
+        }
 
     logger.debug(f"Modify Order Response: {response}")
     logger.debug(f"Modify Order Status Code: {res.status_code}")

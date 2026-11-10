@@ -452,6 +452,9 @@ def map_product_type(product):
         "CNC": "C",
         "NRML": "M",
         "MIS": "I",
+        "CO": "H",
+        "BO": "B",
+        "MTF": "F",
     }
     return product_type_mapping.get(product, "I")  # Default to DELIVERY if not found
 
@@ -464,5 +467,8 @@ def reverse_map_product_type(product):
         "C": "CNC",
         "M": "NRML",
         "I": "MIS",
+        "H": "CO",
+        "B": "BO",
+        "F": "MTF",
     }
     return reverse_product_type_mapping.get(product)

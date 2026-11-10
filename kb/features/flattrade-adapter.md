@@ -40,18 +40,18 @@ Qwantonomous Engine's trading requirements. The full record lives in
   `#` is what the official subscribe frame takes, so issue #1732's routing fix
   uses Flattrade's own format rather than an invented one.
 
-### Open discrepancies (recorded, NOT fixed)
-The order path is the least-guarded part of the plugin — both findings below are
-the same family as the two defects that already reached production:
-- `api/order_api.py#place_order_api` hard-indexes `response_data["stat"]`; a reply
-  without it raises `KeyError` → generic HTTP 500. Every book reader uses `.get()`.
-- `api/order_api.py` never calls `_apply_rate_limit()`, so the **order** path is
-  uncounted against the official 10/sec · 40/min limit — which is 4× tighter than
-  the 40/sec · 200/min limit `api/data.py` does enforce.
-- `mapping/transform_data.py#reverse_map_product_type` returns `None` for `H`/`B`/`F`
-  (Cover/Bracket/MTF), and `close_all_positions` passes that into the square-off
-  payload's `product`. Unreachable via the app's own order path; reachable on a
-  position opened in the Flattrade web terminal.
+### Discrepancies
+Three order-path discrepancies were closed by code fixes on 2026-11-10 (tests:
+`test/test_flattrade_order_path_fixes.py`):
+- `api/order_api.py#place_order_api` now parses defensively — no more hard-indexed
+  `response_data["stat"]` (KeyError → 500 on an HTML/proxy reply).
+- `api/order_api.py` now calls `_apply_rate_limit()` before every order/read
+  request, so the order path is counted against the shared account window.
+- `mapping/transform_data.py#reverse_map_product_type` now maps `H`/`B`/`F`
+  (Cover/Bracket/MTF) → `CO`/`BO`/`MTF` (and back), so a square-off keeps the
+  position's real product instead of sending `product: None`.
+
+Still open:
 - `streaming/flattrade_websocket.py#AUTH_SUCCESS` is `"OK"` but the official ack
   writes `"Ok"`; the comparison is case-sensitive. The order adapter already
   accepts both — the market-data client does not.

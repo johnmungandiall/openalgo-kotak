@@ -720,8 +720,8 @@ gap is explicit rather than discovered later.
 ## 11. Discrepancies found while mapping
 
 Each is a real difference between the official contract and the adapter, read
-from both sides. None of these was changed as part of this documentation work —
-they are recorded so the decision is visible.
+from both sides. **Three were closed by code fixes on 2026-11-10** (11.4,
+11.6, 11.11); the rest are recorded so the decision is visible.
 
 ### 11.1 Auth response field name
 
@@ -750,21 +750,14 @@ PlaceOrder field table. It is either an undocumented field the OMS ignores, or a
 leftover from another Noren deployment. **Severity: low** — but it is an
 undocumented field on every single order.
 
-### 11.4 `reverse_map_product_type` returns `None` for H / B / F
+### 11.4 `reverse_map_product_type` returns `None` for H / B / F — **FIXED**
 
 Official `prd` includes `H` (Cover), `B` (Bracket), `F` (MTF). The reverse map
-covers only `C`/`M`/`I`:
-
-```python
-reverse_product_type_mapping = {"C": "CNC", "M": "NRML", "I": "MIS"}
-return reverse_product_type_mapping.get(product)   # None for H/B/F
-```
-
-`close_all_positions` passes that result straight into the square-off payload's
-`product`. A position held as Cover or Bracket would therefore send
-`product: None`. **Severity: medium** — it cannot happen through the app's own
-order path (which only ever sends C/M/I), but it can happen on a position opened
-in the Flattrade web terminal.
+used to cover only `C`/`M`/`I`, so a position opened in the Flattrade web
+terminal as Cover/Bracket/MTF sent `product: None` on square-off.
+`mapping/transform_data.py#reverse_map_product_type` now maps `H`→`CO`,
+`B`→`BO`, `F`→`MTF`, and `map_product_type` maps back the same way, so the
+round-trip preserves the product. Test: `test/test_flattrade_order_path_fixes.py`.
 
 ### 11.5 `EOS` retention is clamped to `DAY`
 
@@ -772,16 +765,14 @@ Official `ret` enum is `DAY` / `EOS` / `IOC`. `_retention` accepts only
 `DAY`/`IOC`. A caller sending `EOS` silently gets `DAY`. **Severity: low** — the
 engine sends `IOC` or `DAY` only, so nothing in the app path hits it.
 
-### 11.6 `place_order_api` hard-indexes `stat`
+### 11.6 `place_order_api` hard-indexes `stat` — **FIXED**
 
-```python
-if response_data["stat"] == "Ok":
-```
-
-A reply without `stat` (an HTML error page, a proxy response) raises `KeyError`
-inside the broker module, which the service layer converts to a generic HTTP 500.
-Every other book reader in the plugin uses `.get()`. **Severity: medium** — same
-defect family as the two documented production bugs, on the order path.
+`api/order_api.py#place_order_api` used `response_data["stat"]` and
+`response_data["norenordno"]` directly — a reply without `stat` (an HTML error
+page, a proxy response) raised `KeyError` → generic HTTP 500. It now parses
+defensively (`res.json()` guarded, `stat`/`norenordno` read via `.get()`), so a
+malformed reply becomes a broker-shaped failure. Test:
+`test/test_flattrade_order_path_fixes.py`.
 
 ### 11.7 `cancel_order` reads `message`, not `emsg`
 
@@ -810,17 +801,14 @@ Covered in §9.3. **Severity: medium** — a healthy session could be treated as
 auth rejection, which force-closes the socket and enters the bounded auth-retry
 path.
 
-### 11.11 Order endpoints are not rate-limited
+### 11.11 Order endpoints are not rate-limited — **FIXED**
 
 Official: **Order APIs 10/sec, 40/min**; all other APIs 40/sec, 200/min.
 
-`api/data.py` implements the **non-order** limit (38/sec, 190/min) and
-`api/funds.py` participates in it. But `api/order_api.py` — PlaceOrder,
-ModifyOrder, CancelOrder, and the book reads — **never calls
-`_apply_rate_limit()`**. The order path is therefore uncounted against a limit
-that is **4× tighter** than the one being enforced. **Severity: medium** — a
-square-off sweep over many positions, plus the engine's 3 retries, is exactly the
-burst that could hit 10/sec.
+`api/order_api.py` — PlaceOrder, ModifyOrder, CancelOrder, and the book reads —
+now calls `_apply_rate_limit()` (the shared 38/sec · 190/min account window)
+before every outbound request, so the order path is counted against the same
+budget as every other Flattrade call.
 
 ---
 
