@@ -41,6 +41,17 @@ def test_read_book_no_data_marker_is_empty():
     assert order_api._read_book({"stat": "Not_Ok", "emsg": "no data"}, "book") == []
 
 
+def test_read_book_lowercase_stat_ok_is_readable():
+    """Live Kotak replies carry lowercase stat='ok'; must not raise (regression)."""
+    reply = {"stat": "ok", "data": [{"exSeg": "NSE", "flBuyQty": "10"}]}
+    assert order_api._read_book(reply, "Kotak position book") == reply["data"]
+
+
+def test_read_book_lowercase_not_ok_data_marker_is_empty():
+    """Lowercase 'not_ok' with the no-data marker must read as empty too."""
+    assert order_api._read_book({"stat": "not_ok", "emsg": "no data"}, "book") == []
+
+
 def test_read_book_none_and_garbage_raise():
     with pytest.raises(order_api.BrokerReadError):
         order_api._read_book(None, "book")

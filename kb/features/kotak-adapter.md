@@ -59,6 +59,39 @@ all (N1) — the order-placement half of R1 is complete.
 The tests exercise the real functions with the broker/HTTP boundary
 monkeypatched, so a regression fails there rather than in production.
 
+## K20 — market-data feed migrated from HSM to SFeed (2026-11-11)
+
+Kotak retired the legacy HSM host (`mlhsm.kotaksecurities.com` no longer exists
+in DNS — the connection failed with `[Errno 11001] getaddrinfo failed`). The
+live feed now goes through Kotak's SFeed endpoint, resolved per data centre
+from `https://lapi.kotaksecurities.com/5config/config` (no DC selects "hs"
+anymore).
+
+What changed in `broker/kotak/streaming/`:
+- `sfeed_protocol.py` (new) — little-endian binary SFeed decoder (`native_batch`).
+- `sfeed_websocket.py` (new) — `KotakSFeedWebSocket`, drop-in replacement for
+  `KotakWebSocket` with the same method surface and normalized dicts.
+- `kotak_feed_config.py` (new) — `fetch_feed_config(data_center)` resolves the
+  market-data URL per data centre, defaulting to `wss://sfeed.kotaksecurities.com/apifeed`.
+- `kotak_adapter.py#_build_feed_client` — picks `KotakSFeedWebSocket` unless the
+  data centre explicitly still selects HSM; `_data_center_from` derives the DC
+  from the auth token's stored baseUrl host when present.
+
+Index handling (SFeed addresses indices by NAME, not token):
+- `_INDEX_NAMES` / `index_name_candidates` / `is_index_exchange`.
+- `subscribe_quote`/`subscribe_depth` route index exchanges to sub_type `ifs`
+  with the index name (e.g. `nse_cm|Nifty 50`); unsubscribe via `ifu`.
+- `_index_feed_names` registers the token AND every candidate name so an index
+  packet arriving under either identity matches; `_index_targets_for`/
+  `_alias_registry` fan out one tick to every OpenAlgo symbol sharing the name
+  (NIFTY and NIFTY50).
+- `_on_data_received` falls back to the feed name when the packet's token is
+  Kotak's own (e.g. `4247863880`) rather than the master-contract token.
+
+Verification: `test/test_kotak_sfeed_index_subscription.py` (new, 5 passing) +
+`test/test_kotak_adapter_fixes.py`, `test/test_kotak_history.py`,
+`test/test_kotak_funds_pnl.py` (60 passing).
+
 ## K19 funds PnL — computed from the position book
 Kotak's limits reply carries `RealizedMtomPrsnt` / `UnrealizedMtomPrsnt`, but
 its `rpnl` is **inaccurate for closed positions** — the reason PR
@@ -108,6 +141,10 @@ subscribe and partial-update merging. Flattrade polls REST for order updates.
   `get_oa_symbol`), using `tok` only when the broker happens to include it — no
   more KeyError aborting the sweep.
 - **K4** `_read_book` + `BrokerReadError` distinguish empty from unreadable;
+  stat comparisons are case-insensitive ("ok"/"Ok", "not_ok"/"Not_Ok") — Kotak's
+  live positions reply uses lowercase `stat='ok'`, which used to raise
+  `BrokerReadError` on every read and forced funds to API-provided PnL
+- **K4** `_read_book` + `BrokerReadError` distinguish empty from unreadable;
   `get_open_position` propagates the error so a smart order never trades on a
   book it could not see. Kotak's empty marker differs from Flattrade's: `stat:
   "Ok"` with an empty/absent `data`, not a `"no data"` emsg. **Live shape**
@@ -115,7 +152,12 @@ subscribe and partial-update merging. Flattrade polls REST for order updates.
   "desc":"data not found", "stat":"Not_Ok"}` — `_is_empty_book_response` now
   also folds `errMsg`/`desc` into the marker scan, so the flat book reads as
   `[]` instead of raising and forcing a false "read failed" fallback on every
-  funds poll.
+  funds poll. **Live shape (2026-11-11)**: the positions reply uses lowercase
+  `stat='ok'` (and `not_ok` on failure), so `_read_book` / `_is_empty_book_response`
+  compare the stat case-insensitively — previously every funds poll logged
+  `Kotak position book read failed (unexpected reply, stat='ok')` and fell back
+  to API-provided PnL. Regression tests: `test_read_book_lowercase_stat_ok_is_readable`,
+  `test_read_book_lowercase_not_ok_data_marker_is_empty`.
 
 ## N1 historical data — RESOLVED (Yahoo fallback)
 Kotak Neo has **no candle endpoint** (only scrip-master CSV links and a current

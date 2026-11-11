@@ -48,7 +48,11 @@ def _as_int(value):
 
 def _is_empty_book_response(response):
     """True only when a Not_Ok reply specifically means "there are no rows"."""
-    if not isinstance(response, dict) or response.get("stat") != "Not_Ok":
+    if not isinstance(response, dict):
+        return False
+    # Kotak's live replies have been observed with lowercase stat values; the
+    # documented spelling is "Not_Ok", but treat any case as equal.
+    if str(response.get("stat")).lower() != "not_ok":
         return False
     # Kotak puts the human-readable error in `emsg` in the docs, but the live
     # API answers a flat positions book with `errMsg` + `desc` ("No Data" /
@@ -78,10 +82,11 @@ def _read_book(response, what):
         if _is_empty_book_response(response):
             return []
         stat = response.get("stat")
-        if stat == "Not_Ok":
+        stat_norm = str(stat).lower()
+        if stat_norm == "not_ok":
             detail = response.get("emsg") or response.get("message") or "unknown error"
             raise BrokerReadError(f"{what} read failed ({detail})")
-        if stat != "Ok":
+        if stat_norm != "ok":
             # Neither documented shape: no stat, or an unexpected value. We
             # cannot tell empty from unreadable, so we must not guess.
             raise BrokerReadError(

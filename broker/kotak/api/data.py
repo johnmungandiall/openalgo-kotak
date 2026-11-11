@@ -50,6 +50,17 @@ class BrokerData:
             "1h": "60m",
             "D": "1d",
         }
+        # Yahoo's per-interval depth caps. Yahoo rejects a request whose window
+        # exceeds these (HTTP 422 -> empty frame -> blank chart), so the window
+        # is clamped to them before the request goes out. Keys are the OpenAlgo
+        # intervals; daily is unbounded in practice and stays unclamped.
+        self._yahoo_max_range_days = {
+            "1m": 6,
+            "5m": 59,
+            "15m": 59,
+            "30m": 59,
+            "1h": 700,
+        }
         # OpenAlgo index symbol -> Yahoo Finance ticker. Scoped to the indices the
         # Qwantonomous app uses (NIFTY / BANKNIFTY / SENSEX). Any other symbol
         # degrades to an empty history frame rather than risk returning the wrong
@@ -749,6 +760,28 @@ class BrokerData:
             period2 = self._ist_midnight_epoch(end_date, end=True)
         except ValueError:
             logger.exception(f"Invalid history date range: {start_date} .. {end_date}")
+            return empty_df
+
+        # Clamp the window to Yahoo's per-interval depth cap. Without this, a
+        # chart opening index 15m with the terminal's 60-day lookback gets an
+        # HTTP 422 and an empty frame - a blank index chart while everything
+        # else shows data.
+        max_days = self._yahoo_max_range_days.get(interval)
+        if max_days:
+            now_epoch = int(datetime.now(pytz.timezone("Asia/Kolkata")).timestamp())
+            earliest_allowed = now_epoch - max_days * 86400
+            if period1 < earliest_allowed:
+                logger.info(
+                    f"Yahoo {interval} history only reaches back {max_days} days; "
+                    f"clamping window from {period1} to {earliest_allowed} (requested "
+                    f"start {start_date})"
+                )
+                period1 = earliest_allowed
+        if period1 >= period2:
+            logger.warning(
+                f"History window collapses to nothing after Yahoo range clamp: "
+                f"{start_date} .. {end_date} ({interval})"
+            )
             return empty_df
 
         url = self._YAHOO_CHART_URL.format(ticker=urllib.parse.quote(ticker))

@@ -7,10 +7,13 @@ import threading
 import time
 
 from database.auth_db import get_auth_token
+from utils.config import get_broker_api_key
 from utils.logging import get_logger
 from websocket_proxy.base_adapter import BaseBrokerWebSocketAdapter
 
+from .kotak_feed_config import SOURCE_HSM, fetch_feed_config
 from .kotak_websocket import KotakWebSocket
+from .sfeed_websocket import KotakSFeedWebSocket
 
 logger = get_logger(__name__)
 
@@ -25,6 +28,81 @@ _SCRIP_OPS = {
     "ifs": ("index", False),
     "ifu": ("index", True),
 }
+
+
+# Kotak's own names for the indices, which is how the index feed addresses them:
+# "nse_cm|Nifty 50", not the master-contract token. The names are not derivable
+# from the master contract, which stores the short ticker.
+_INDEX_NAMES = {
+    "NIFTY": ["Nifty 50"],
+    "NIFTY50": ["Nifty 50"],
+    "BANKNIFTY": ["Nifty Bank"],
+    "FINNIFTY": ["Nifty Fin Service"],
+    "MIDCPNIFTY": [
+        "Nifty Mid Select",
+        "Nifty Midcap Sel",
+        "Nifty Midcap Select",
+        "NIFTY MID SELECT",
+    ],
+    "NIFTYNXT50": ["Nifty Next 50"],
+    "INDIAVIX": ["India VIX"],
+    "SENSEX": ["SENSEX"],
+    "BANKEX": ["BANKEX"],
+}
+
+
+def index_name_candidates(symbol):
+    """Kotak's candidate names for an OpenAlgo index symbol, best first."""
+    return _INDEX_NAMES.get((symbol or "").upper(), [symbol])
+
+
+def is_index_exchange(exchange):
+    """Whether an OpenAlgo exchange names indices rather than tradeable scrips."""
+    return (exchange or "").upper().endswith("_INDEX")
+
+
+def _data_center_from(auth_parts):
+    """Best-effort data-centre code from the stored auth token, or "" if unknown.
+
+    The api token stores the tradeApiValidate baseUrl (e.g.
+    https://e21.kotaksecurities.com) in its third component. The feed config
+    service keys its entries by the data-centre code (E21, E43, ...), which is
+    the baseUrl host's first label uppercased. A token without one yields "",
+    which fetch_feed_config() turns into the default SFeed endpoint rather than
+    a failure.
+    """
+    if len(auth_parts) > 4 and auth_parts[4]:
+        return auth_parts[4]
+    if len(auth_parts) >= 3:
+        base_url = auth_parts[2] or ""
+        host = base_url.split("://")[-1].split("/")[0]
+        label = host.split(".")[0]
+        if label and "." not in label:
+            return label.upper()
+    return ""
+
+
+def _build_feed_client(auth_config, user_id):
+    """Pick the market-data client this account's data centre is routed to.
+
+    Kotak has retired the legacy HSM feed (mlhsm.kotaksecurities.com no longer
+    resolves), and resolves the feed host per data centre. SFeed is the
+    default; the legacy HSM client is kept only for a data centre that still
+    explicitly asks for it.
+    """
+    config = fetch_feed_config(auth_config.get("data_center"))
+    if config["source"] == SOURCE_HSM:
+        logger.info(f"Kotak user {user_id}: data centre routes to the legacy HSM feed")
+        return KotakWebSocket(auth_config)
+    logger.info(
+        f"Kotak user {user_id}: market data via {config['market_data_url']} "
+        f"(source {config['source'] or 'default'})"
+    )
+    return KotakSFeedWebSocket(
+        auth_config,
+        ws_url=config["market_data_url"],
+        ucc=get_broker_api_key(),
+    )
 
 
 class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
@@ -66,6 +144,10 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
         # Track active subscription modes per symbol - CRITICAL FOR MULTI-CLIENT SUPPORT
         self._symbol_modes = {}  # {(kotak_exchange, token): set of active modes}
+
+        # Index alias -> every OpenAlgo index subscribed under it, with its
+        # master-contract token: {(kotak_exchange, name): {(exchange, symbol): token}}
+        self._index_alias_targets = {}
 
         # Batch subscription management - debounced fan-in so a burst of
         # subscribe()/unsubscribe() calls collapses into one HSI frame per
@@ -115,9 +197,11 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
         self._auth_config = dict(
             zip(["auth_token", "sid", "hs_server_id", "access_token"], auth_parts)
         )
+        self._auth_config["data_center"] = _data_center_from(auth_parts)
 
         # Create websocket client
-        self._ws_client = KotakWebSocket(self._auth_config)
+        self._ws_client = _build_feed_client(self._auth_config, user_id)
+        self._max_batch_size = getattr(self._ws_client, "MAX_BATCH_SIZE", 100)
 
         # Set up internal callbacks - this MUST happen during initialization like AliceBlue
         self._setup_internal_callbacks()
@@ -185,7 +269,91 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 on_error=on_error_internal,
             )
 
-    def _on_data_received(self, parsed_data):
+    def _index_targets_for(self, broker_exchange, token, feed_name):
+        """Every OpenAlgo index subscribed under the alias this tick carries.
+
+        Caller holds self._lock. Two OpenAlgo symbols can name the same Kotak
+        index (NIFTY and NIFTY50 both subscribe "nse_cm|Nifty 50"), and the
+        single-valued _kotak_to_openalgo entry for the name holds whichever
+        subscribed last, so the other one would never receive a tick.
+        """
+        aliases = self._alias_registry()
+        if not aliases:
+            return []
+        targets = aliases.get((broker_exchange, token))
+        if not targets and feed_name:
+            targets = aliases.get((broker_exchange, feed_name))
+        if not targets:
+            return []
+        return [(exchange, symbol, tok) for (exchange, symbol), tok in targets.items()]
+
+    def _alias_registry(self):
+        """{(kotak_exchange, index name): {(exchange, symbol): token}}.
+
+        Created on first use as well as in __init__, so an adapter built
+        without __init__ (as the tests do) still has one.
+        """
+        registry = self.__dict__.get("_index_alias_targets")
+        if registry is None:
+            registry = self.__dict__["_index_alias_targets"] = {}
+        return registry
+
+    def _index_feed_names(self, kotak_exchange, exchange, symbol, token, register=True):
+        """The index name(s) to subscribe, registering how their ticks map back.
+
+        Only the first candidate is subscribed. A subscribe frame carries many
+        scrips and Kotak answers it as a whole, so sending a speculative
+        spelling would risk taking the other indices batched with it down too.
+
+        Every candidate is still registered on the inbound side, alongside the
+        master-contract token, because an index packet may identify itself by
+        its name or by a token of Kotak's own choosing, and accepting either
+        costs nothing. Without this the tick arrives and matches no
+        subscription, which looks exactly like no tick at all.
+
+        Several OpenAlgo symbols can share one name (NIFTY and NIFTY50 are both
+        "Nifty 50"), so each name also records every symbol subscribed under
+        it, and a tick is fanned out to all of them.
+
+        register=False only returns the names: the unsubscribe path uses it,
+        and registering there would bring back the mapping it just removed.
+        """
+        candidates = index_name_candidates(symbol)
+        if not register:
+            return candidates[:1]
+        with self._lock:
+            for key in [str(token), *candidates]:
+                mapping_key = (kotak_exchange, key)
+                self._kotak_to_openalgo[mapping_key] = (exchange, symbol)
+                self._symbol_modes.setdefault(mapping_key, set())
+            # Every alias shares one mode set, or a tick arriving under the name
+            # would be published in whichever modes the token happened to hold.
+            modes = self._symbol_modes[(kotak_exchange, str(token))]
+            aliases = self._alias_registry()
+            for key in candidates:
+                self._symbol_modes[(kotak_exchange, key)] = modes
+                aliases.setdefault((kotak_exchange, key), {})[(exchange, symbol)] = str(token)
+        return candidates[:1]
+
+    def _drop_index_alias_target(self, kotak_exchange, exchange, symbol):
+        """Forget one symbol's index aliases once it has no mode left.
+
+        Caller holds self._lock. A name nobody is subscribed under any more
+        loses its mapping too.
+        """
+        aliases = self._alias_registry()
+        for key in index_name_candidates(symbol):
+            alias_key = (kotak_exchange, key)
+            targets = aliases.get(alias_key)
+            if not targets:
+                continue
+            targets.pop((exchange, symbol), None)
+            if not targets:
+                aliases.pop(alias_key, None)
+                self._kotak_to_openalgo.pop(alias_key, None)
+                self._symbol_modes.pop(alias_key, None)
+
+    def _on_data_received(self, parsed_data, _target=None):
         """Handle received and parsed market data - FIXED for partial updates like AliceBlue."""
         try:
             logger.debug(f"Data received: {parsed_data}")
@@ -202,7 +370,35 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
             # Extract key identifiers - following AliceBlue pattern
             token = str(parsed_data.get("tk", ""))
             broker_exchange = parsed_data.get("e", "UNKNOWN")
+            feed_name = str(parsed_data.get("ts", "") or "")
             ltp = parsed_data.get("ltp")
+
+            # An index tick goes to every OpenAlgo symbol subscribed under its
+            # alias, each keyed by its own master-contract token so its state,
+            # caches and modes stay its own.
+            if _target is None:
+                with self._lock:
+                    targets = self._index_targets_for(broker_exchange, token, feed_name)
+                if targets:
+                    for exchange, symbol, target_token in targets:
+                        self._on_data_received(
+                            {**parsed_data, "tk": target_token}, _target=(exchange, symbol)
+                        )
+                    return
+
+            # An index names itself. Its packet carries a token of Kotak's own
+            # choosing rather than the master-contract one -- NIFTY subscribed
+            # as "nse_cm|Nifty 50" answers with tk 4247863880, not 26000 -- so
+            # keying on the token alone matches no subscription and the tick is
+            # dropped, which looks exactly like the feed never sending one. The
+            # name is the identity we subscribed under, so fall back to it.
+            with self._lock:
+                known = (broker_exchange, token) in self._kotak_to_openalgo
+                by_name = (
+                    bool(feed_name) and (broker_exchange, feed_name) in self._kotak_to_openalgo
+                )
+            if _target is None and not known and by_name:
+                token = feed_name
 
             # **CRITICAL FIX**: Check if this is depth data (has bids/asks) or LTP data
             has_depth_data = "bids" in parsed_data and "asks" in parsed_data
@@ -645,6 +841,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self._symbol_state.clear()
                 self._depth_poll_state.clear()
                 self._kotak_to_openalgo.clear()
+                self._alias_registry().clear()
                 self._symbol_modes.clear()
                 self.subscriptions.clear()
                 self._reconnect_attempts = 0
@@ -792,9 +989,11 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                     auth_parts,
                 )
             )
+            self._auth_config["data_center"] = _data_center_from(auth_parts)
 
             # Create new WebSocket client
-            self._ws_client = KotakWebSocket(self._auth_config)
+            self._ws_client = _build_feed_client(self._auth_config, self._user_id)
+            self._max_batch_size = getattr(self._ws_client, "MAX_BATCH_SIZE", 100)
 
             # Restore internal callbacks
             self._setup_internal_callbacks()
@@ -844,6 +1043,7 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self._symbol_state.clear()
                 self._depth_poll_state.clear()
                 self._kotak_to_openalgo.clear()
+                self._alias_registry().clear()
                 self._symbol_modes.clear()
                 self.subscriptions.clear()
 
@@ -1016,11 +1216,23 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 return False
 
             # Enqueue for batched dispatch — flushed by _process_batch_subscriptions.
-            self._enqueue_subscription(kotak_exchange, token, sub_type="mws")
-            logger.debug(
-                f"Queued quote subscription: {exchange}:{symbol} "
-                f"(kotak: {kotak_exchange}|{token})"
-            )
+            #
+            # An index rides its own feed. Kotak addresses it by name rather
+            # than by master-contract token ("nse_cm|Nifty 50", documented under
+            # Subscribe Index) and answers on message 7207, which only
+            # subscribeIndices delivers. Subscribed as an ordinary scrip it is
+            # accepted and then simply never ticks, which is what left the
+            # option chain's spot reading 0.00 with no price ever arriving.
+            if is_index_exchange(exchange):
+                for feed_name in self._index_feed_names(kotak_exchange, exchange, symbol, token):
+                    self._enqueue_subscription(kotak_exchange, feed_name, sub_type="ifs")
+                logger.debug(f"Queued index subscription: {exchange}:{symbol}")
+            else:
+                self._enqueue_subscription(kotak_exchange, token, sub_type="mws")
+                logger.debug(
+                    f"Queued quote subscription: {exchange}:{symbol} "
+                    f"(kotak: {kotak_exchange}|{token})"
+                )
             return True
 
         except Exception as e:
@@ -1067,12 +1279,33 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                         # Clean up symbol state to prevent unbounded memory growth
                         symbol_key = f"{kotak_exchange}|{token}"
                         self._symbol_state.pop(symbol_key, None)
+                        if is_index_exchange(exchange):
+                            self._drop_index_alias_target(kotak_exchange, exchange, symbol)
                         logger.debug(f"Cleaned up mapping for: {exchange}:{symbol}")
+
+            # Another OpenAlgo symbol may still be subscribed under the same index
+            # name (NIFTY and NIFTY50); the broker feed for that name stays until
+            # the last of them goes.
+            if should_unsub_broker and is_index_exchange(exchange):
+                aliases = self._alias_registry()
+                if any(
+                    aliases.get((kotak_exchange, name))
+                    for name in self._index_feed_names(
+                        kotak_exchange, exchange, symbol, token, register=False
+                    )
+                ):
+                    should_unsub_broker = False
 
             # Enqueue outside lock — batched by _process_batch_subscriptions,
             # so tearing down a large watchlist costs one frame, not one each.
             if should_unsub_broker:
-                self._enqueue_subscription(kotak_exchange, token, sub_type="mwu")
+                if is_index_exchange(exchange):
+                    for feed_name in self._index_feed_names(
+                        kotak_exchange, exchange, symbol, token, register=False
+                    ):
+                        self._enqueue_subscription(kotak_exchange, feed_name, sub_type="ifu")
+                else:
+                    self._enqueue_subscription(kotak_exchange, token, sub_type="mwu")
                 logger.debug(f"Queued broker unsubscribe: {exchange}:{symbol}")
 
         except Exception as e:
@@ -1111,10 +1344,19 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 return False
 
             # Enqueue for batched dispatch — flushed by _process_batch_subscriptions.
+            #
+            # Depth on an index means its price: there is no book to ask for,
+            # and the depth feed answers one with five zero levels. See the
+            # quote path above for why this goes to the index feed instead.
+            if is_index_exchange(exchange):
+                for feed_name in self._index_feed_names(kotak_exchange, exchange, symbol, token):
+                    self._enqueue_subscription(kotak_exchange, feed_name, sub_type="ifs")
+                logger.debug(f"Queued index subscription for depth: {exchange}:{symbol}")
+                return True
+
             self._enqueue_subscription(kotak_exchange, token, sub_type="dps")
             logger.debug(
-                f"Queued depth subscription: {exchange}:{symbol} "
-                f"(kotak: {kotak_exchange}|{token})"
+                f"Queued depth subscription: {exchange}:{symbol} (kotak: {kotak_exchange}|{token})"
             )
             return True
 
@@ -1159,11 +1401,32 @@ class KotakWebSocketAdapter(BaseBrokerWebSocketAdapter):
                         # Clean up symbol state to prevent unbounded memory growth
                         symbol_key = f"{kotak_exchange}|{token}"
                         self._symbol_state.pop(symbol_key, None)
+                        if is_index_exchange(exchange):
+                            self._drop_index_alias_target(kotak_exchange, exchange, symbol)
                         logger.debug(f"Cleaned up mapping for: {exchange}:{symbol}")
+
+            # Another OpenAlgo symbol may still be subscribed under the same index
+            # name (NIFTY and NIFTY50); the broker feed for that name stays until
+            # the last of them goes.
+            if should_unsub_broker and is_index_exchange(exchange):
+                aliases = self._alias_registry()
+                if any(
+                    aliases.get((kotak_exchange, name))
+                    for name in self._index_feed_names(
+                        kotak_exchange, exchange, symbol, token, register=False
+                    )
+                ):
+                    should_unsub_broker = False
 
             # Enqueue outside lock — batched by _process_batch_subscriptions.
             if should_unsub_broker:
-                self._enqueue_subscription(kotak_exchange, token, sub_type="dpu")
+                if is_index_exchange(exchange):
+                    for feed_name in self._index_feed_names(
+                        kotak_exchange, exchange, symbol, token, register=False
+                    ):
+                        self._enqueue_subscription(kotak_exchange, feed_name, sub_type="ifu")
+                else:
+                    self._enqueue_subscription(kotak_exchange, token, sub_type="dpu")
                 logger.debug(f"Queued broker depth unsubscribe: {exchange}:{symbol}")
 
         except Exception as e:
