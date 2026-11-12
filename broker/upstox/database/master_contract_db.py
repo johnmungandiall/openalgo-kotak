@@ -330,6 +330,7 @@ def master_contract_download():
     url = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
     input_path = "tmp/temp_upstox.json.gz"
     output_path = "tmp/upstox.json"
+    os.makedirs("tmp", exist_ok=True)
     try:
         download_and_unzip_upstox_data(url, input_path, output_path)
         token_df = process_upstox_json(output_path)

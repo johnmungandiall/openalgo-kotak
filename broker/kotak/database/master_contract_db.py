@@ -104,6 +104,9 @@ def download_csv_kotak_data(output_path):
     # Create a list to hold the paths of the downloaded files
     downloaded_files = []
 
+    # Ensure the output directory exists (fresh clones lack the gitignored tmp/)
+    os.makedirs(output_path, exist_ok=True)
+
     # Iterate through the URLs and download the CSV files
     for key, url in csv_urls.items():
         try:

@@ -393,6 +393,7 @@ def master_contract_download():
     logger.info("Downloading Master Contract")
     url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
     output_path = "tmp/angel.json"
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     try:
         download_json_angel_data(url, output_path)
         token_df = process_angel_json(output_path)

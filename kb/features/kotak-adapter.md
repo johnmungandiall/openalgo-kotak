@@ -231,6 +231,22 @@ second.
 **local patch** — an OpenAlgo upgrade that overwrites these files silently
 reintroduces the defects.
 
+## K21 — fresh clone: `tmp/` directory missing breaks master-contract download (2026-11-12)
+
+`tmp/` is gitignored (`.gitignore` line 28), so a fresh clone has no `tmp/`
+folder. `broker/kotak/database/master_contract_db.py#download_csv_kotak_data`
+writes `tmp/<key>.csv` without creating the directory → every download failed
+with `[Errno 2] No such file or directory: 'tmp/CDE_FO.csv'` → zero symbols in
+DB → `No token found for RELIANCE on NSE`, so symbol search/charts/live market
+data all appeared dead while REST features worked.
+
+Fix (local patch): `os.makedirs(output_path, exist_ok=True)` added at the top
+of the download loop in `download_csv_kotak_data`; same guard added to the
+zerodha (`master_contract_download`), upstox (`master_contract_download`),
+nubra (`master_contract_download`) and angel (`master_contract_download`)
+master-contract downloaders. samco and fivepaisa already had
+`os.makedirs("tmp", exist_ok=True)`.
+
 See [[gotchas]], [[features/flattrade-adapter]] for the reference
 implementation of each guard, and [[features/broker-api-docs]] for the mirrored
 Kotak docs.

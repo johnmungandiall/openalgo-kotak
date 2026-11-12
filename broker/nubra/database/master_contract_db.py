@@ -411,6 +411,7 @@ def master_contract_download():
     instruments_path = 'tmp/nubra_instruments.json'
     indexes_path = 'tmp/nubra_indexes.csv'
 
+    os.makedirs("tmp", exist_ok=True)
     try:
         # Download and process instrument data
         download_nubra_instruments(instruments_path)

@@ -373,6 +373,7 @@ def master_contract_download():
 
 
     output_path = 'tmp/zerodha.csv'
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     try:
         download_csv_zerodha_data(output_path)
         token_df = process_zerodha_csv(output_path)
