@@ -139,7 +139,52 @@ def get_positionbook_with_auth(
         # Format numeric values to 2 decimal places
         formatted_positions = format_position_data(positions_data)
 
-        return True, {"status": "success", "data": formatted_positions}, 200
+        # Engine contract (§2.2): the Position Book screen reads the top-level
+        # `mode` and totals, and the full row shape (lot_size, pnlpercent,
+        # today_realized_pnl, unrealized_pnl). The live broker path previously
+        # returned only `{status, data}` — mode and totals fell to defaults and
+        # the row fields were blank in the UI. Fill them from the fields the
+        # adapter already computed; a missing field degrades to a safe default,
+        # never a throw.
+        total_pnl = 0.0
+        total_today_realized_pnl = 0.0
+        total_unrealized_pnl = 0.0
+        for row in formatted_positions:
+            try:
+                realized = float(row.get("realized_pnl") or 0)
+                unrealized = float(row.get("unrealized_pnl") or row.get("pnl") or 0)
+                pnl = float(row.get("pnl") or (realized + unrealized))
+            except (TypeError, ValueError):
+                realized = unrealized = pnl = 0.0
+            total_pnl += pnl
+            total_today_realized_pnl += realized
+            total_unrealized_pnl += unrealized
+
+            row.setdefault("lot_size", 1)
+            row.setdefault("today_realized_pnl", round(realized, 2))
+            row.setdefault("unrealized_pnl", round(unrealized, 2))
+            row.setdefault("pnlpercent", 0.0)
+            if not isinstance(row.get("pnlpercent"), (int, float)) or row["pnlpercent"] == 0.0:
+                try:
+                    qty = int(row.get("quantity") or 0)
+                    avg = float(row.get("average_price") or 0)
+                    if qty != 0 and avg != 0:
+                        row["pnlpercent"] = round((pnl / (qty * avg)) * 100, 2)
+                except (TypeError, ValueError):
+                    pass
+
+        return (
+            True,
+            {
+                "status": "success",
+                "mode": "live",
+                "data": formatted_positions,
+                "total_pnl": round(total_pnl, 2),
+                "total_today_realized_pnl": round(total_today_realized_pnl, 2),
+                "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+            },
+            200,
+        )
     except Exception as e:
         logger.exception(f"Error processing positions data: {e}")
         return False, {"status": "error", "message": str(e)}, 500
