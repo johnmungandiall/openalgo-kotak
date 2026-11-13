@@ -652,7 +652,30 @@ def get_option_chain(
                     "tick_size": item["ce"]["tick_size"],
                 }
             else:
-                strike_data["ce"] = None
+                # A leg missing from the master contract is still emitted as a
+                # canonical object — symbol/label plus zeroed quote fields —
+                # never None. The engine's chain parsers read `symbol`,
+                # `ltp` and `oi` off every ce/pe object and skip rows with
+                # zero OI/LTP; a null leg would instead break N-in → N-out
+                # symmetry (F7) and could crash consumers that assume an
+                # object.
+                strike_data["ce"] = {
+                    "symbol": ce_symbol,
+                    "label": item["ce"]["label"],
+                    "ltp": 0,
+                    "bid": 0,
+                    "ask": 0,
+                    "bid_qty": 0,
+                    "ask_qty": 0,
+                    "open": 0,
+                    "high": 0,
+                    "low": 0,
+                    "prev_close": 0,
+                    "volume": 0,
+                    "oi": 0,
+                    "lotsize": item["ce"]["lotsize"],
+                    "tick_size": item["ce"]["tick_size"],
+                }
 
             # PE data (label inside PE object)
             pe_symbol = item["pe"]["symbol"]
@@ -676,7 +699,30 @@ def get_option_chain(
                     "tick_size": item["pe"]["tick_size"],
                 }
             else:
-                strike_data["pe"] = None
+                # A leg missing from the master contract is still emitted as a
+                # canonical object — symbol/label plus zeroed quote fields —
+                # never None. The engine's chain parsers read `symbol`,
+                # `ltp` and `oi` off every ce/pe object and skip rows with
+                # zero OI/LTP; a null leg would instead break N-in → N-out
+                # symmetry (F7) and could crash consumers that assume an
+                # object.
+                strike_data["pe"] = {
+                    "symbol": pe_symbol,
+                    "label": item["pe"]["label"],
+                    "ltp": 0,
+                    "bid": 0,
+                    "ask": 0,
+                    "bid_qty": 0,
+                    "ask_qty": 0,
+                    "open": 0,
+                    "high": 0,
+                    "low": 0,
+                    "prev_close": 0,
+                    "volume": 0,
+                    "oi": 0,
+                    "lotsize": item["pe"]["lotsize"],
+                    "tick_size": item["pe"]["tick_size"],
+                }
 
             chain.append(strike_data)
 
